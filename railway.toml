@@ -1,4 +1,4 @@
 [deploy]
-startCommand = "python3 app.py"
+startCommand = "gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120 --log-level debug --capture-output --access-logfile -"
 healthcheckPath = "/health"
 healthcheckTimeout = 120

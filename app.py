@@ -1,9 +1,18 @@
 """
 Milka Implementation Report Generator
 Flask web app: upload WhatsApp ZIP → generate PPTX
-Run: python app.py
+Run: python app.py  (local)   |   gunicorn app:app  (production)
 """
-import os, uuid, threading, shutil
+import sys
+import os
+import uuid
+import threading
+import shutil
+
+# Force unbuffered output so Railway logs always show errors
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+
 from datetime import datetime, timedelta
 from pathlib import Path
 from flask import Flask, request, jsonify, send_file, render_template_string
@@ -13,10 +22,15 @@ from processor import process_zip, CHAIN_ORDER
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500 MB
 
-BASE_DIR  = Path(__file__).parent
-UPLOAD_DIR = Path(os.environ.get('UPLOAD_DIR', '/tmp/milka_uploads'))
+BASE_DIR      = Path(__file__).parent
+UPLOAD_DIR    = Path(os.environ.get('UPLOAD_DIR', '/tmp/milka_uploads'))
 TEMPLATE_PPTX = BASE_DIR / 'Template_Ejemplo.pptx'
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+try:
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    print(f'[startup] UPLOAD_DIR: {UPLOAD_DIR}', flush=True)
+except Exception as _e:
+    print(f'[startup] WARNING: could not create UPLOAD_DIR {UPLOAD_DIR}: {_e}', flush=True)
 
 # In-memory job store  {job_id: {status, progress, result, error}}
 jobs: dict = {}
