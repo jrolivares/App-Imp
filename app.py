@@ -569,6 +569,7 @@ def download(job_id):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5001))
     print('\n🚀  Sell-Out · Generador de Informes de Implementación')
-    print('   Abre tu navegador en:  http://localhost:5001\n')
-    app.run(debug=False, host='0.0.0.0', port=5001)
+    print(f'   Abre tu navegador en:  http://localhost:{port}\n')
+    app.run(debug=False, host='0.0.0.0', port=port)
