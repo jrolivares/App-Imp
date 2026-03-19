@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "nanobanana-ppt-skills": {
+      "source": "smithery.ai",
+      "sourceType": "well-known",
+      "computedHash": "1c81b1cff99d8d1a82f09f3d5afb74cf0cf00de44772c36d339e97071adfc773"
+    }
+  }
+}
