@@ -14,9 +14,9 @@ app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500 MB
 
 BASE_DIR  = Path(__file__).parent
-UPLOAD_DIR = BASE_DIR / 'uploads'
+UPLOAD_DIR = Path(os.environ.get('UPLOAD_DIR', '/tmp/milka_uploads'))
 TEMPLATE_PPTX = BASE_DIR / 'Template_Ejemplo.pptx'
-UPLOAD_DIR.mkdir(exist_ok=True)
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 # In-memory job store  {job_id: {status, progress, result, error}}
 jobs: dict = {}
