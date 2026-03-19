@@ -485,6 +485,11 @@ def index():
     return render_template_string(HTML)
 
 
+@app.route('/health')
+def health():
+    return jsonify(status='ok')
+
+
 @app.route('/upload', methods=['POST'])
 def upload():
     if 'file' not in request.files:
