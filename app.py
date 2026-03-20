@@ -295,13 +295,12 @@ HTML = r"""<!DOCTYPE html>
 <footer>Sell-Out · Generador de Informes de Implementación</footer>
 
 <script>
-// Default dates: last 14 days
+// Default dates: current month (day 1 to today)
 const today = new Date();
-const twoWeeksAgo = new Date(today);
-twoWeeksAgo.setDate(today.getDate() - 14);
+const firstOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
 const fmt = d => d.toISOString().split('T')[0];
 document.getElementById('end-date').value = fmt(today);
-document.getElementById('start-date').value = fmt(twoWeeksAgo);
+document.getElementById('start-date').value = fmt(firstOfMonth);
 
 // Drop zone
 const dropZone = document.getElementById('drop-zone');

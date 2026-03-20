@@ -111,7 +111,8 @@ BAD_WORDS = ['campaña', 'correo', 'problema', 'aparece', 'quieren', 'fecha de t
              'agregué', 'buen día', 'estará', 'porfa', 'enviados', 'si no',
              'revisando', 'añadir', 'están', 'terminó', 'implementación?', 'buen']
 
-LINE_RE   = re.compile(r'^\[(\d{2}-\d{2}-\d{2}), (\d{1,2}:\d{2}:\d{2})\u202f([AP]M)\] ([^:]+): (.*)$')
+# Soporta formato 12h con AM/PM y formato 24h sin AM/PM
+LINE_RE = re.compile(r'^\[(\d{2}-\d{2}-\d{2}), (\d{1,2}:\d{2}:\d{2})(?:\u202f([AP]M))?\] ([^:]+): (.*)$')
 ATTACH_RE = re.compile(r'<attached: (\d+-PHOTO-[\d-]+\.jpg)>')
 
 
@@ -126,7 +127,10 @@ def parse_messages(chat_text: str) -> list:
             if current:
                 messages.append(current)
             d, t, ap, sender, txt = m.groups()
-            dt = datetime.strptime(f'{d} {t} {ap}', '%d-%m-%y %I:%M:%S %p')
+            if ap:  # formato 12h con AM/PM
+                dt = datetime.strptime(f'{d} {t} {ap}', '%d-%m-%y %I:%M:%S %p')
+            else:   # formato 24h sin AM/PM
+                dt = datetime.strptime(f'{d} {t}', '%d-%m-%y %H:%M:%S')
             current = {'dt': dt, 'sender': sender.strip(), 'text': txt,
                        'photos': ATTACH_RE.findall(txt)}
         else:
