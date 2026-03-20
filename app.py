@@ -389,7 +389,15 @@ document.getElementById('upload-form').addEventListener('submit', async e => {
   let jobId;
   try {
     const res = await fetch('/upload', { method: 'POST', body: formData });
-    const data = await res.json();
+    let data;
+    const ct = res.headers.get('content-type') || '';
+    if (ct.includes('application/json')) {
+      data = await res.json();
+    } else {
+      const txt = await res.text();
+      if (res.status === 413) throw new Error('El archivo ZIP es demasiado grande para el servidor (máx 500 MB)');
+      throw new Error(`Error del servidor (${res.status}). Revisa que el archivo sea un ZIP válido de WhatsApp.`);
+    }
     if (!res.ok) throw new Error(data.error || 'Error al subir');
     jobId = data.job_id;
   } catch (err) {
@@ -490,6 +498,17 @@ function showResults(result, jobId) {
 </script>
 </body>
 </html>"""
+
+
+# ── Error handlers ────────────────────────────────────────────────────────────
+
+@app.errorhandler(413)
+def too_large(e):
+    return jsonify(error='El archivo es demasiado grande. Máximo permitido: 500 MB'), 413
+
+@app.errorhandler(500)
+def server_error(e):
+    return jsonify(error=f'Error interno del servidor: {str(e)}'), 500
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
