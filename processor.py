@@ -257,20 +257,41 @@ def parse_status(text):
 
 def extract_stores(messages: list, start_date: datetime, end_date: datetime) -> list:
     recent = [m for m in messages if start_date <= m['dt'] < end_date]
+
+    # Pre-calcular índices de todos los mensajes de tienda
+    store_indices = [i for i, m in enumerate(recent) if is_store_message(m['text'])]
+    store_idx_set = set(store_indices)
+
     raw = []
-    for i, msg in enumerate(recent):
-        if not is_store_message(msg['text']):
-            continue
+    for rank, i in enumerate(store_indices):
+        msg = recent[i]
         chain, prefix = detect_chain(msg['text'])
         code, address, city = parse_store_line(msg['text'], chain, prefix)
+
+        # Buscar fotos entre este mensaje de tienda y el próximo
+        # (independiente del sender y sin límite estricto de tiempo)
+        next_store_i = store_indices[rank + 1] if rank + 1 < len(store_indices) else len(recent)
+
         photos = []
-        for j in range(max(0, i - 20), min(len(recent), i + 10)):
+        for j in range(i, min(next_store_i, len(recent))):
             other = recent[j]
-            if other['sender'] != msg['sender']:
-                continue
             diff = (other['dt'] - msg['dt']).total_seconds()
-            if -180 <= diff <= 180 and other['photos']:
+            # Parar si hay más de 30 minutos de diferencia (evitar mezclar tiendas lejanas)
+            if diff > 1800:
+                break
+            if other['photos']:
                 photos.extend(other['photos'])
+
+        # También incluir fotos enviadas hasta 2 min ANTES (contexto previo del mismo sender)
+        for j in range(max(0, i - 15), i):
+            if j in store_idx_set:
+                break   # no cruzar hacia la tienda anterior
+            other = recent[j]
+            if other['sender'] == msg['sender']:
+                diff = (msg['dt'] - other['dt']).total_seconds()
+                if diff <= 120 and other['photos']:
+                    photos.extend(other['photos'])
+
         seen = set()
         photos = [p for p in photos if not (p in seen or seen.add(p))]
         pl, bt, notes = parse_status(msg['text'])
