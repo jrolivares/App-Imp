@@ -20,7 +20,7 @@ from flask import Flask, request, jsonify, send_file, render_template_string
 from processor import process_zip, CHAIN_ORDER
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500 MB
+app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2 GB
 
 BASE_DIR      = Path(__file__).parent
 UPLOAD_DIR    = Path(os.environ.get('UPLOAD_DIR', '/tmp/milka_uploads'))
