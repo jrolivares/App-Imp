@@ -1,2 +1,2 @@
 [start]
-cmd = "gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120 --log-level debug --capture-output --access-logfile -"
+cmd = "gunicorn app:app --bind 0.0.0.0:$PORT --worker-class gthread --workers 1 --threads 4 --timeout 120 --log-level debug --capture-output --access-logfile -"
