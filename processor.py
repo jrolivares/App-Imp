@@ -1,10 +1,11 @@
 """
 WhatsApp chat parser + PPTX generator for Mondelez Milka implementations.
 """
-import re, json, os, copy, zipfile, csv, difflib, unicodedata, urllib.request
+import re, json, os, copy, zipfile, csv, difflib, unicodedata, urllib.request, io
 from datetime import datetime
 from pathlib import Path
 from collections import defaultdict
+from PIL import Image, ImageOps
 from pptx import Presentation
 from pptx.util import Inches, Pt, Emu
 from lxml import etree
@@ -264,6 +265,27 @@ def extract_stores(messages: list, start_date: datetime, end_date: datetime) -> 
 
 # ── PPTX generation ───────────────────────────────────────────────────────────
 
+def open_corrected(img_path: str, max_px: int = 1200) -> io.BytesIO:
+    """
+    Abre imagen, corrige orientación EXIF y reduce resolución si supera max_px.
+    Fotos de celular suelen ser 4000x3000 — para PPTX sobra con 1200px.
+    Retorna BytesIO listo para add_picture(), o None si falla.
+    """
+    try:
+        img = Image.open(img_path)
+        img = ImageOps.exif_transpose(img)          # corregir rotación EXIF
+        if img.mode not in ('RGB', 'L'):
+            img = img.convert('RGB')                 # JPEG solo acepta RGB/L
+        if img.width > max_px or img.height > max_px:
+            img.thumbnail((max_px, max_px), Image.LANCZOS)   # reducir tamaño
+        buf = io.BytesIO()
+        img.save(buf, format='JPEG', quality=82)
+        buf.seek(0)
+        return buf
+    except Exception:
+        return None
+
+
 def select_photos(photos, n, photos_dir):
     if n == 0:
         return []
@@ -396,9 +418,10 @@ def update_store_slide(slide, store, photos_dir):
         left, top, w, h = pic_sh.left, pic_sh.top, pic_sh.width, pic_sh.height
         slide.shapes._spTree.remove(pic_sh._element)
         if i < len(sel):
-            img = str(Path(photos_dir, sel[i]))
+            img_path = str(Path(photos_dir, sel[i]))
             try:
-                slide.shapes.add_picture(img, left, top, w, h)
+                img_src = open_corrected(img_path) or img_path
+                slide.shapes.add_picture(img_src, left, top, w, h)
             except Exception:
                 pass
         else:
