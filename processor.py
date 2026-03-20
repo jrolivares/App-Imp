@@ -21,11 +21,13 @@ SHEETS_CSV_URL = os.environ.get(
     '/pub?output=csv'
 )
 
-_store_db_cache: list = None   # filas cargadas (sin encabezado)
+_store_db_cache: list = None      # filas crudas
+_store_db_index: list = None      # (nombre_norm, words_set, row) pre-calculado
+_lookup_cache:   dict = {}        # query → resultado cacheado
 
 
 def _norm(text: str) -> str:
-    """Normaliza texto para comparación fuzzy: minúsculas, sin tildes, sin puntuación."""
+    """Normaliza texto: minúsculas, sin tildes, sin puntuación."""
     text = text.lower().strip()
     text = unicodedata.normalize('NFD', text)
     text = ''.join(c for c in text if unicodedata.category(c) != 'Mn')
@@ -36,29 +38,39 @@ def _norm(text: str) -> str:
 
 def load_store_db() -> list:
     """Carga y cachea la base de tiendas desde Google Sheets CSV."""
-    global _store_db_cache
+    global _store_db_cache, _store_db_index
     if _store_db_cache is not None:
         return _store_db_cache
     try:
         req = urllib.request.urlopen(SHEETS_CSV_URL, timeout=15)
         content = req.read().decode('utf-8-sig')
         rows = list(csv.reader(content.splitlines()))
-        _store_db_cache = rows[1:]          # saltar encabezado
+        _store_db_cache = rows[1:]
+        # Pre-normalizar una sola vez al cargar
+        _store_db_index = [
+            (_norm(row[5]), set(_norm(row[5]).split()), row)
+            for row in _store_db_cache if len(row) >= 9
+        ]
         print(f'[store_db] {len(_store_db_cache)} tiendas cargadas.', flush=True)
     except Exception as exc:
         print(f'[store_db] No se pudo cargar la base de tiendas: {exc}', flush=True)
         _store_db_cache = []
+        _store_db_index = []
     return _store_db_cache
 
 
 def lookup_store(query: str):
     """
-    Busca en la base de tiendas la fila que mejor coincide con *query*.
-    Compara contra col F (Nombre Sala) y col G (Dirección).
-    Retorna dict {cadena, nombre_sala, comuna, region} o None si no hay match.
+    Busca la tienda más parecida a *query* usando el índice pre-normalizado.
+    Usa word-overlap como filtro rápido y SequenceMatcher solo en candidatos.
+    Cachea resultados para no repetir búsquedas idénticas.
     """
-    db = load_store_db()
-    if not db:
+    if query in _lookup_cache:
+        return _lookup_cache[query]
+
+    load_store_db()
+    if not _store_db_index:
+        _lookup_cache[query] = None
         return None
 
     q = _norm(query)
@@ -66,35 +78,31 @@ def lookup_store(query: str):
 
     best_score, best_row = 0.0, None
 
-    for row in db:
-        if len(row) < 9:
-            continue
-        nombre   = _norm(row[5])   # col F – Nombre Sala
-        direccion = _norm(row[6])  # col G – Dirección
-
-        # Similitud de secuencia contra Nombre Sala
-        ratio = difflib.SequenceMatcher(None, q, nombre).ratio()
-
-        # Solapamiento de palabras clave
-        nombre_words = set(nombre.split())
+    for nombre, nombre_words, row in _store_db_index:
+        # 1) Word-overlap: rápido O(1)
         overlap = len(q_words & nombre_words) / max(len(q_words), 1)
-
+        # 2) SequenceMatcher solo si overlap es prometedor (> 0.3)
+        if overlap > 0.3:
+            ratio = difflib.SequenceMatcher(None, q, nombre).ratio()
+        else:
+            ratio = 0.0
         score = max(ratio, overlap * 0.88)
-
         if score > best_score:
             best_score = score
             best_row = row
 
     THRESHOLD = 0.55
+    result = None
     if best_score >= THRESHOLD and best_row is not None:
-        return {
-            'cadena':      best_row[3],   # col D
-            'nombre_sala': best_row[5],   # col F
-            'comuna':      best_row[7],   # col H
-            'region':      best_row[8],   # col I
+        result = {
+            'cadena':      best_row[3],
+            'nombre_sala': best_row[5],
+            'comuna':      best_row[7],
+            'region':      best_row[8],
             'score':       round(best_score, 3),
         }
-    return None
+    _lookup_cache[query] = result
+    return result
 
 CHAIN_ORDER = ['SISA', 'JUMBO', 'HIPER', 'SANTA ISABEL', 'TOTTUS', 'SMU', 'UNIMARC']
 
@@ -265,19 +273,34 @@ def extract_stores(messages: list, start_date: datetime, end_date: datetime) -> 
 
 # ── PPTX generation ───────────────────────────────────────────────────────────
 
-def open_corrected(img_path: str, max_px: int = 1200) -> io.BytesIO:
+def open_corrected(img_path: str, max_px: int = 1200):
     """
-    Abre imagen, corrige orientación EXIF y reduce resolución si supera max_px.
-    Fotos de celular suelen ser 4000x3000 — para PPTX sobra con 1200px.
-    Retorna BytesIO listo para add_picture(), o None si falla.
+    Corrige orientación EXIF y reduce resolución solo si es necesario.
+    - Si la foto ya es pequeña y no está rotada → devuelve None (usa archivo original, rápido).
+    - Si necesita ajuste → devuelve BytesIO con imagen corregida.
     """
     try:
-        img = Image.open(img_path)
-        img = ImageOps.exif_transpose(img)          # corregir rotación EXIF
+        img = Image.open(img_path)   # lazy: no decodifica píxeles todavía
+
+        # Leer orientación EXIF sin decodificar la imagen completa
+        try:
+            orientation = (img.getexif() or {}).get(274, 1)
+        except Exception:
+            orientation = 1
+
+        needs_rotate = orientation not in (1, 0, None)
+        needs_resize = img.width > max_px or img.height > max_px
+
+        if not needs_rotate and not needs_resize:
+            return None   # sin cambios → usar archivo original directamente
+
+        img.load()   # decodificar solo si realmente hay que modificar
+        img = ImageOps.exif_transpose(img)
         if img.mode not in ('RGB', 'L'):
-            img = img.convert('RGB')                 # JPEG solo acepta RGB/L
+            img = img.convert('RGB')
         if img.width > max_px or img.height > max_px:
-            img.thumbnail((max_px, max_px), Image.LANCZOS)   # reducir tamaño
+            img.thumbnail((max_px, max_px), Image.LANCZOS)
+
         buf = io.BytesIO()
         img.save(buf, format='JPEG', quality=82)
         buf.seek(0)
