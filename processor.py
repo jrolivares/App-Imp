@@ -139,8 +139,23 @@ BAD_WORDS = [
 
 # Soporta formato 12h con AM/PM y formato 24h sin AM/PM
 LINE_RE = re.compile(r'^\[(\d{2}-\d{2}-\d{2}), (\d{1,2}:\d{2}:\d{2})(?:\u202f([AP]M))?\] ([^:]+): (.*)$')
-# Adjuntos en inglés (attached) y español (adjunto)
-ATTACH_RE = re.compile(r'<(?:attached|adjunto): (\d+-PHOTO-[\d-]+\.(?:jpg|jpeg|png))', re.IGNORECASE)
+# Adjuntos formato antiguo: <attached: file.jpg> / <adjunto: file.jpg>
+ATTACH_RE = re.compile(
+    r'<(?:attached|adjunto):\s*([^\s>][^>]*\.(?:jpg|jpeg|png|webp))\s*>',
+    re.IGNORECASE
+)
+# Adjuntos formato nuevo: file.jpg (file attached) / file.jpg (archivo adjunto)
+ATTACH_RE_PAREN = re.compile(
+    r'([\w][\w\-\.]*\.(?:jpg|jpeg|png|webp))\s*\((?:file attached|archivo adjunto)\)',
+    re.IGNORECASE
+)
+
+
+def find_photos(text: str) -> list:
+    """Extrae nombres de archivo de fotos de un fragmento de texto WhatsApp.
+    Soporta formato antiguo (<adjunto: ...>) y formato nuevo (... (archivo adjunto)).
+    """
+    return ATTACH_RE.findall(text) + ATTACH_RE_PAREN.findall(text)
 
 
 # ── Chat parsing ──────────────────────────────────────────────────────────────
@@ -159,11 +174,11 @@ def parse_messages(chat_text: str) -> list:
             else:   # formato 24h sin AM/PM
                 dt = datetime.strptime(f'{d} {t}', '%d-%m-%y %H:%M:%S')
             current = {'dt': dt, 'sender': sender.strip(), 'text': txt,
-                       'photos': ATTACH_RE.findall(txt)}
+                       'photos': find_photos(txt)}
         else:
             if current:
                 current['text'] += '\n' + line
-                current['photos'] += ATTACH_RE.findall(line)
+                current['photos'] += find_photos(line)
     if current:
         messages.append(current)
     return messages
@@ -259,6 +274,7 @@ def extract_stores(messages: list, start_date: datetime, end_date: datetime) -> 
         seen = set()
         photos = [p for p in photos if not (p in seen or seen.add(p))]
         pl, bt, notes = parse_status(msg['text'])
+        print(f'[extract] tienda={code or address[:30]!r} fotos={len(photos)}', flush=True)
 
         # Buscar tienda en base de datos formal (filtrando por cadena)
         query = f"{chain} {address}" if address else chain
@@ -337,10 +353,30 @@ def open_corrected(img_path: str, max_px: int = 1200):
         return None
 
 
-def select_photos(photos, n, photos_dir):
+def build_photo_index(photos_dir: str) -> dict:
+    """
+    Construye un índice {nombre_archivo → path_completo} buscando recursivamente
+    en photos_dir. Necesario cuando el ZIP tiene subcarpetas (ej. Media/).
+    """
+    index = {}
+    for root, _, files in os.walk(photos_dir):
+        for f in files:
+            if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
+                # Guardamos solo si no está ya (prioridad a rutas más cortas / raíz)
+                if f not in index:
+                    index[f] = os.path.join(root, f)
+    return index
+
+
+def select_photos(photos, n, photos_dir, _photo_index=None):
+    """
+    Selecciona hasta n fotos de la lista y devuelve sus paths completos.
+    Usa _photo_index si ya fue construido; si no, lo construye internamente.
+    """
     if n == 0:
         return []
-    avail = [p for p in photos if Path(photos_dir, p).exists()]
+    idx = _photo_index if _photo_index is not None else build_photo_index(photos_dir)
+    avail = [idx[p] for p in photos if p in idx]
     if not avail:
         return []
     if len(avail) <= n:
@@ -401,7 +437,7 @@ def update_caption(shape, slot, fecha, pl_status, bt_status):
         set_line(para, groups[3], f'STATUS: {status}')
 
 
-def update_store_slide(slide, store, photos_dir):
+def update_store_slide(slide, store, photos_dir, photo_index=None):
     code = store.get('code', '')
     address = store.get('address', '')
     city = store.get('city', '')
@@ -463,13 +499,13 @@ def update_store_slide(slide, store, photos_dir):
     for slot, cap in enumerate(captions):
         update_caption(cap, slot, fecha, pl_stat, bt_stat)
 
-    sel = select_photos(photos, len(pic_shapes), photos_dir)
+    sel = select_photos(photos, len(pic_shapes), photos_dir, _photo_index=photo_index)
     sorted_pics = sorted(pic_shapes, key=lambda s: s.left)
     for i, pic_sh in enumerate(sorted_pics):
         left, top, w, h = pic_sh.left, pic_sh.top, pic_sh.width, pic_sh.height
         slide.shapes._spTree.remove(pic_sh._element)
         if i < len(sel):
-            img_path = str(Path(photos_dir, sel[i]))
+            img_path = sel[i]  # ya es path completo
             try:
                 img_src = open_corrected(img_path) or img_path
                 slide.shapes.add_picture(img_src, left, top, w, h)
@@ -524,6 +560,10 @@ def generate_pptx(stores: list, photos_dir: str, template_path: str, output_path
         prs.part.drop_rel(rId)
         del prs.slides._sldIdLst[idx]
 
+    # Construir índice de fotos una sola vez (búsqueda recursiva en subdirectorios)
+    photo_index = build_photo_index(photos_dir)
+    print(f'[pptx] {len(photo_index)} fotos indexadas en {photos_dir}', flush=True)
+
     by_chain = defaultdict(list)
     for s in stores:
         by_chain[s['chain']].append(s)
@@ -536,7 +576,7 @@ def generate_pptx(stores: list, photos_dir: str, template_path: str, output_path
         make_chain_divider(prs, chain, title_slide_idx=0)
         for store in chain_stores:
             new_slide = add_slide_copy(prs, 1)
-            update_store_slide(new_slide, store, photos_dir)
+            update_store_slide(new_slide, store, photos_dir, photo_index=photo_index)
         summary[chain] = len(chain_stores)
 
     # Remove the store template slide
