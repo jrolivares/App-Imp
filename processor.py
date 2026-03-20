@@ -1,13 +1,99 @@
 """
 WhatsApp chat parser + PPTX generator for Mondelez Milka implementations.
 """
-import re, json, os, copy, zipfile
+import re, json, os, copy, zipfile, csv, difflib, unicodedata, urllib.request
 from datetime import datetime
 from pathlib import Path
 from collections import defaultdict
 from pptx import Presentation
 from pptx.util import Inches, Pt, Emu
 from lxml import etree
+
+
+# ── Store database (Google Sheets) ───────────────────────────────────────────
+
+# URL del CSV publicado – se puede sobreescribir con la variable de entorno STORE_DB_URL
+SHEETS_CSV_URL = os.environ.get(
+    'STORE_DB_URL',
+    'https://docs.google.com/spreadsheets/d/e/'
+    '2PACX-1vRX_MbNxlPJqTpAg89E51WOrp-oqNd6fAwjlN00ON6-SG1tGzQZNj7ZTs-0vgRAy53u0Dqjhi0I6Cyn'
+    '/pub?output=csv'
+)
+
+_store_db_cache: list = None   # filas cargadas (sin encabezado)
+
+
+def _norm(text: str) -> str:
+    """Normaliza texto para comparación fuzzy: minúsculas, sin tildes, sin puntuación."""
+    text = text.lower().strip()
+    text = unicodedata.normalize('NFD', text)
+    text = ''.join(c for c in text if unicodedata.category(c) != 'Mn')
+    text = re.sub(r'[^\w\s]', ' ', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+
+def load_store_db() -> list:
+    """Carga y cachea la base de tiendas desde Google Sheets CSV."""
+    global _store_db_cache
+    if _store_db_cache is not None:
+        return _store_db_cache
+    try:
+        req = urllib.request.urlopen(SHEETS_CSV_URL, timeout=15)
+        content = req.read().decode('utf-8-sig')
+        rows = list(csv.reader(content.splitlines()))
+        _store_db_cache = rows[1:]          # saltar encabezado
+        print(f'[store_db] {len(_store_db_cache)} tiendas cargadas.', flush=True)
+    except Exception as exc:
+        print(f'[store_db] No se pudo cargar la base de tiendas: {exc}', flush=True)
+        _store_db_cache = []
+    return _store_db_cache
+
+
+def lookup_store(query: str):
+    """
+    Busca en la base de tiendas la fila que mejor coincide con *query*.
+    Compara contra col F (Nombre Sala) y col G (Dirección).
+    Retorna dict {cadena, nombre_sala, comuna, region} o None si no hay match.
+    """
+    db = load_store_db()
+    if not db:
+        return None
+
+    q = _norm(query)
+    q_words = set(q.split())
+
+    best_score, best_row = 0.0, None
+
+    for row in db:
+        if len(row) < 9:
+            continue
+        nombre   = _norm(row[5])   # col F – Nombre Sala
+        direccion = _norm(row[6])  # col G – Dirección
+
+        # Similitud de secuencia contra Nombre Sala
+        ratio = difflib.SequenceMatcher(None, q, nombre).ratio()
+
+        # Solapamiento de palabras clave
+        nombre_words = set(nombre.split())
+        overlap = len(q_words & nombre_words) / max(len(q_words), 1)
+
+        score = max(ratio, overlap * 0.88)
+
+        if score > best_score:
+            best_score = score
+            best_row = row
+
+    THRESHOLD = 0.55
+    if best_score >= THRESHOLD and best_row is not None:
+        return {
+            'cadena':      best_row[3],   # col D
+            'nombre_sala': best_row[5],   # col F
+            'comuna':      best_row[7],   # col H
+            'region':      best_row[8],   # col I
+            'score':       round(best_score, 3),
+        }
+    return None
 
 CHAIN_ORDER = ['SISA', 'JUMBO', 'HIPER', 'SANTA ISABEL', 'TOTTUS', 'SMU', 'UNIMARC']
 
@@ -132,11 +218,21 @@ def extract_stores(messages: list, start_date: datetime, end_date: datetime) -> 
         seen = set()
         photos = [p for p in photos if not (p in seen or seen.add(p))]
         pl, bt, notes = parse_status(msg['text'])
+
+        # Buscar tienda en base de datos formal
+        query = f"{chain} {address}" if address else chain
+        db_match = lookup_store(query)
+
         raw.append({
             'chain': chain, 'code': code, 'address': address, 'city': city,
             'sender': msg['sender'], 'date': msg['dt'].strftime('%d/%m/%Y'),
             'datetime': msg['dt'].isoformat(),
             'photos': photos, 'payloader': pl, 'botaderos': bt, 'notes': notes,
+            # Datos formales desde la planilla (None si no hubo match)
+            'db_cadena':      db_match['cadena']      if db_match else None,
+            'db_nombre_sala': db_match['nombre_sala']  if db_match else None,
+            'db_comuna':      db_match['comuna']       if db_match else None,
+            'db_region':      db_match['region']       if db_match else None,
         })
     # Deduplicate
     deduped = {}
@@ -239,9 +335,28 @@ def update_store_slide(slide, store, photos_dir):
     bt_stat = 'Implementado'
 
     chain_label = chain if chain else 'SISA'
-    header_text = (f'{code} {chain_label} - {address}' if code else f'{chain_label} - {address}')
-    if city:
-        header_text += f', {city}'
+
+    # Usar datos formales de la planilla si están disponibles
+    db_nombre = store.get('db_nombre_sala')
+    db_comuna = store.get('db_comuna')
+    db_region = store.get('db_region')
+    db_cadena = store.get('db_cadena')
+
+    if db_nombre:
+        # Formato: NOMBRE SALA — Comuna, Región
+        partes = [db_nombre]
+        if db_comuna:
+            partes.append(db_comuna)
+        if db_region:
+            partes.append(db_region)
+        header_text = ' — '.join(partes[:1]) + (f' — {db_comuna}' if db_comuna else '')
+        if db_region and db_region != db_comuna:
+            header_text += f', {db_region}'
+    else:
+        # Fallback: datos parseados desde WhatsApp
+        header_text = (f'{code} {chain_label} - {address}' if code else f'{chain_label} - {address}')
+        if city:
+            header_text += f', {city}'
 
     text_shapes = [s for s in slide.shapes if s.has_text_frame]
 
