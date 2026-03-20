@@ -59,29 +59,36 @@ def load_store_db() -> list:
     return _store_db_cache
 
 
-def lookup_store(query: str):
+def lookup_store(query: str, chain: str = None):
     """
-    Busca la tienda más parecida a *query* usando el índice pre-normalizado.
-    Usa word-overlap como filtro rápido y SequenceMatcher solo en candidatos.
-    Cachea resultados para no repetir búsquedas idénticas.
+    Busca la tienda más parecida a *query* en el índice pre-normalizado.
+    - chain: cadena detectada en WhatsApp (ej. 'SISA', 'JUMBO') para filtrar
+             y evitar matches cruzados entre cadenas distintas.
     """
-    if query in _lookup_cache:
-        return _lookup_cache[query]
+    cache_key = f"{chain}|{query}"
+    if cache_key in _lookup_cache:
+        return _lookup_cache[cache_key]
 
     load_store_db()
     if not _store_db_index:
-        _lookup_cache[query] = None
+        _lookup_cache[cache_key] = None
         return None
 
     q = _norm(query)
     q_words = set(q.split())
 
+    # Prefijo de cadena para filtrar (primeras 4 letras normalizadas)
+    chain_prefix = _norm(chain)[:4] if chain else None
+
     best_score, best_row = 0.0, None
 
     for nombre, nombre_words, row in _store_db_index:
-        # 1) Word-overlap: rápido O(1)
+        # Filtrar por cadena: el Nombre Sala debe empezar con el prefijo de la cadena
+        if chain_prefix and not nombre.startswith(chain_prefix):
+            continue
+        # 1) Word-overlap rápido
         overlap = len(q_words & nombre_words) / max(len(q_words), 1)
-        # 2) SequenceMatcher solo si overlap es prometedor (> 0.3)
+        # 2) SequenceMatcher solo si overlap es prometedor
         if overlap > 0.3:
             ratio = difflib.SequenceMatcher(None, q, nombre).ratio()
         else:
@@ -101,7 +108,7 @@ def lookup_store(query: str):
             'region':      best_row[8],
             'score':       round(best_score, 3),
         }
-    _lookup_cache[query] = result
+    _lookup_cache[cache_key] = result
     return result
 
 CHAIN_ORDER = ['SISA', 'JUMBO', 'HIPER', 'SANTA ISABEL', 'TOTTUS', 'SMU', 'UNIMARC']
@@ -116,13 +123,24 @@ CHAIN_RULES = [
     ('UNIMARC',      r'\bUnimarc\b|\bUNIMARC\b',  'U'),
 ]
 
-BAD_WORDS = ['campaña', 'correo', 'problema', 'aparece', 'quieren', 'fecha de término',
-             'agregué', 'buen día', 'estará', 'porfa', 'enviados', 'si no',
-             'revisando', 'añadir', 'están', 'terminó', 'implementación?', 'buen']
+BAD_WORDS = [
+    # Operativos / logística
+    'implementación', 'implementacion', 'botadero', 'payloader', 'payloder',
+    'material', 'ingreso', 'autorizar', 'abastece', 'abastecer', 'stock',
+    'bodega', 'armar', 'solicita', 'solicitud', 'encargada', 'reponedor',
+    'rechaza', 'pendiente', 'dejar', 'dejar en', 'nota en',
+    # Comunicación / saludo
+    'campaña', 'correo', 'problema', 'aparece', 'quieren', 'fecha de término',
+    'agregué', 'buen día', 'estará', 'porfa', 'enviados', 'si no',
+    'revisando', 'añadir', 'están', 'terminó', 'buen',
+    # Señales de que es un reporte, no un identificador de tienda
+    'imagen omitida', 'adjunto:', '@',
+]
 
 # Soporta formato 12h con AM/PM y formato 24h sin AM/PM
 LINE_RE = re.compile(r'^\[(\d{2}-\d{2}-\d{2}), (\d{1,2}:\d{2}:\d{2})(?:\u202f([AP]M))?\] ([^:]+): (.*)$')
-ATTACH_RE = re.compile(r'<attached: (\d+-PHOTO-[\d-]+\.jpg)>')
+# Adjuntos en inglés (attached) y español (adjunto)
+ATTACH_RE = re.compile(r'<(?:attached|adjunto): (\d+-PHOTO-[\d-]+\.(?:jpg|jpeg|png))', re.IGNORECASE)
 
 
 # ── Chat parsing ──────────────────────────────────────────────────────────────
@@ -164,11 +182,21 @@ def is_store_message(text):
     if not chain:
         return False
     first = text.strip().split('\n')[0].lower()
-    return not any(b in first for b in BAD_WORDS)
+    # Rechazar si contiene palabras de reporte/logística
+    if any(b in first for b in BAD_WORDS):
+        return False
+    # Rechazar patrón "CADENA - [texto libre]" → es un reporte, no identificador
+    # Ejemplo: "SISA - Implementación botadero..." / "JUMBO - En Independencia..."
+    chain_stripped = re.sub(
+        r'\b(?:sisa|jumbo|hiper|santa isabel|tottus|smu|unimarc)\b', '', first, flags=re.IGNORECASE
+    ).strip()
+    if chain_stripped.startswith('- ') or chain_stripped.startswith('-\t'):
+        return False
+    return True
 
 
 def parse_store_line(text, chain, prefix):
-    first = re.sub(r'<attached:[^>]+>', '', text.strip().split('\n')[0]).strip()
+    first = re.sub(r'<(?:attached|adjunto):[^>]+>', '', text.strip().split('\n')[0]).strip()
     parts = first.split('\t')
     if len(parts) >= 3:
         raw_code = re.sub(r'[°º]', '', parts[0].strip())
@@ -232,9 +260,9 @@ def extract_stores(messages: list, start_date: datetime, end_date: datetime) -> 
         photos = [p for p in photos if not (p in seen or seen.add(p))]
         pl, bt, notes = parse_status(msg['text'])
 
-        # Buscar tienda en base de datos formal
+        # Buscar tienda en base de datos formal (filtrando por cadena)
         query = f"{chain} {address}" if address else chain
-        db_match = lookup_store(query)
+        db_match = lookup_store(query, chain=chain)
 
         raw.append({
             'chain': chain, 'code': code, 'address': address, 'city': city,
