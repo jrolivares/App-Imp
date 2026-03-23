@@ -303,6 +303,7 @@ def extract_stores(messages: list, start_date: datetime, end_date: datetime) -> 
 
     # ── Fase 2: asignar fotos a tiendas ───────────────────────────────────────
     store_photos = defaultdict(list)   # store_entry_index → [filenames]
+    photo_timestamps: dict = {}        # filename → datetime del mensaje que la contenía
 
     # Primero: fotos dentro del MISMO mensaje de tienda (enviadas juntas)
     # Bug histórico: el loop de abajo hace break cuando i >= j, así que
@@ -310,6 +311,8 @@ def extract_stores(messages: list, start_date: datetime, end_date: datetime) -> 
     store_msg_indices = {i: k for k, (i, *_) in enumerate(store_entries)}
     for j, msg in enumerate(recent):
         if msg['photos'] and j in store_msg_indices:
+            for p in msg['photos']:
+                photo_timestamps[p] = msg['dt']
             store_photos[store_msg_indices[j]].extend(msg['photos'])
 
     # Luego: fotos enviadas DESPUÉS del mensaje de tienda
@@ -343,6 +346,8 @@ def extract_stores(messages: list, start_date: datetime, end_date: datetime) -> 
         # Same-sender siempre gana si existe (implementador asocia sus propias fotos)
         target = best_same_sender or best_any_sender
         if target:
+            for p in msg['photos']:
+                photo_timestamps[p] = msg['dt']
             store_photos[target[1]].extend(msg['photos'])
         else:
             unassigned += 1
@@ -367,6 +372,8 @@ def extract_stores(messages: list, start_date: datetime, end_date: datetime) -> 
             'sender': msg['sender'], 'date': msg['dt'].strftime('%d/%m/%Y'),
             'datetime': msg['dt'].isoformat(),
             'photos': photos, 'payloader': pl, 'botaderos': bt, 'notes': notes,
+            # Timestamp por foto: filename → datetime (para mostrar la fecha real en el caption)
+            'photo_timestamps': {p: photo_timestamps[p] for p in photos if p in photo_timestamps},
             # Datos formales desde la planilla (None si no hubo match)
             'db_cadena':      db_match['cadena']      if db_match else None,
             'db_nombre_sala': db_match['nombre_sala']  if db_match else None,
@@ -383,6 +390,7 @@ def extract_stores(messages: list, start_date: datetime, end_date: datetime) -> 
             merged = ex['photos'] + s['photos']
             seen = set()
             ex['photos'] = [p for p in merged if not (p in seen or seen.add(p))]
+            ex.setdefault('photo_timestamps', {}).update(s.get('photo_timestamps', {}))
             if s['payloader']:
                 ex['payloader'] = s['payloader']
             if s['botaderos']:
@@ -491,33 +499,46 @@ def set_line(para, idxs, text):
             runs[i].text = ''
 
 
-def update_caption(shape, slot, fecha, pl_status, bt_status):
-    element = 'Payloader Easter' if slot == 0 else 'Botadero Easter'
-    status = pl_status if slot == 0 else bt_status
+def update_caption(shape, photo_date, slot=0, pl_status=None, bt_status=None):
+    """Actualiza el caption de una foto con la fecha real de envío.
+
+    Detecta automáticamente el formato del template:
+    - Simple (1 línea "FECHA: ..."): solo actualiza la fecha → para el nuevo Termplate
+    - Multi-línea (FOTO/FECHA/ELEMENTO/STATUS): rellena todas las líneas → template legado
+    """
     tf = shape.text_frame
     if not tf.paragraphs:
         return
     para = tf.paragraphs[0]
     groups = group_runs_by_br(para)
     n = len(groups)
-    if n >= 1:
-        set_line(para, groups[0], f'FOTO IMPLEMENTACIÓN {slot + 1}')
-    if n >= 2:
-        set_line(para, groups[1], f'FECHA: {fecha}')
-    if n >= 3:
-        g, runs = groups[2], para.runs
-        if len(g) >= 3:
-            runs[g[0]].text = 'ELEMENTO: '
-            runs[g[1]].text = 'Payloader' if slot == 0 else 'Botadero'
-            runs[g[2]].text = ' Easter'
-            for x in g[3:]:
-                runs[x].text = ''
-        elif g:
-            runs[g[0]].text = f'ELEMENTO: {element}'
-            for x in g[1:]:
-                runs[x].text = ''
-    if n >= 4:
-        set_line(para, groups[3], f'STATUS: {status}')
+
+    if n <= 1:
+        # Formato simple: solo hay una línea (ej. "FECHA: 11/03/2026")
+        # Reemplazar con la fecha real de la foto
+        set_line(para, groups[0] if groups else [], f'FECHA: {photo_date}')
+    else:
+        # Formato multi-línea (template legado con FOTO/FECHA/ELEMENTO/STATUS)
+        element = 'Payloader Easter' if slot == 0 else 'Botadero Easter'
+        status = (pl_status if slot == 0 else bt_status) or ''
+        if n >= 1:
+            set_line(para, groups[0], f'FOTO IMPLEMENTACIÓN {slot + 1}')
+        if n >= 2:
+            set_line(para, groups[1], f'FECHA: {photo_date}')
+        if n >= 3:
+            g, runs = groups[2], para.runs
+            if len(g) >= 3:
+                runs[g[0]].text = 'ELEMENTO: '
+                runs[g[1]].text = 'Payloader' if slot == 0 else 'Botadero'
+                runs[g[2]].text = ' Easter'
+                for x in g[3:]:
+                    runs[x].text = ''
+            elif g:
+                runs[g[0]].text = f'ELEMENTO: {element}'
+                for x in g[1:]:
+                    runs[x].text = ''
+        if n >= 4:
+            set_line(para, groups[3], f'STATUS: {status}')
 
 
 def update_store_slide(slide, store, photos_dir, photo_index=None):
@@ -579,8 +600,8 @@ def update_store_slide(slide, store, photos_dir, photo_index=None):
     captions = sorted([s for s in text_shapes
                        if any(k in s.text_frame.text for k in ('FOTO', 'FECHA', 'ELEMENTO'))],
                       key=lambda s: s.left)
-    for slot, cap in enumerate(captions):
-        update_caption(cap, slot, fecha, pl_stat, bt_stat)
+
+    photo_timestamps = store.get('photo_timestamps', {})
 
     sel = select_photos(photos, len(pic_shapes), photos_dir, _photo_index=photo_index)
     sorted_pics = sorted(pic_shapes, key=lambda s: s.left)
@@ -589,12 +610,21 @@ def update_store_slide(slide, store, photos_dir, photo_index=None):
         slide.shapes._spTree.remove(pic_sh._element)
         if i < len(sel):
             img_path = sel[i]  # ya es path completo
+            # Fecha real de la foto (cuando se envió en WhatsApp); fallback a fecha de tienda
+            photo_basename = os.path.basename(img_path)
+            photo_dt = photo_timestamps.get(photo_basename)
+            photo_date = photo_dt.strftime('%d/%m/%Y') if photo_dt else fecha
             try:
                 img_src = open_corrected(img_path) or img_path
                 slide.shapes.add_picture(img_src, left, top, w, h)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f'[pptx] ERROR insertando foto {photo_basename}: {e}', flush=True)
+            # Actualizar caption con la fecha real de ESTA foto
+            if i < len(captions):
+                update_caption(captions[i], photo_date, slot=i,
+                               pl_status=pl_stat, bt_status=bt_stat)
         else:
+            # No hay foto para este slot → eliminar caption correspondiente
             if i < len(captions):
                 try:
                     slide.shapes._spTree.remove(captions[i]._element)
@@ -607,8 +637,25 @@ def add_slide_copy(prs, src_idx):
     new = prs.slides.add_slide(src.slide_layout)
     for shape in list(new.shapes):
         new.shapes._spTree.remove(shape._element)
+
+    # Copiar relaciones de imagen del slide origen al nuevo slide.
+    # Sin esto, los r:embed="rIdX" copiados en el XML no tienen contraparte
+    # en el .rels del nuevo slide → las imágenes aparecen rotas en PowerPoint.
+    rId_map = {}
+    for rId, rel in src.part.rels.items():
+        if 'image' in rel.reltype:
+            new_rId = new.part.relate_to(rel.target_part, rel.reltype)
+            rId_map[rId] = new_rId
+
     for shape in src.shapes:
-        new.shapes._spTree.append(copy.deepcopy(shape._element))
+        elem = copy.deepcopy(shape._element)
+        if rId_map:
+            xml_str = etree.tostring(elem, encoding='unicode')
+            for old_rId, new_rId in rId_map.items():
+                xml_str = xml_str.replace(f'r:embed="{old_rId}"', f'r:embed="{new_rId}"')
+                xml_str = xml_str.replace(f'r:link="{old_rId}"', f'r:link="{new_rId}"')
+            elem = etree.fromstring(xml_str)
+        new.shapes._spTree.append(elem)
     return new
 
 
