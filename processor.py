@@ -133,16 +133,19 @@ def lookup_store(query: str, chain: str = None, code: str = None):
     _lookup_cache[cache_key] = result
     return result
 
-CHAIN_ORDER = ['SISA', 'JUMBO', 'HIPER', 'SANTA ISABEL', 'TOTTUS', 'SMU', 'UNIMARC']
+CHAIN_ORDER = ['SISA', 'JUMBO', 'HIPER', 'SANTA ISABEL', 'TOTTUS', 'SMU', 'UNIMARC',
+               'EASY', 'SODIMAC']
 
 CHAIN_RULES = [
-    ('SISA',         r'\bSisa\b|\bSISA\b',       'N'),
-    ('JUMBO',        r'\bJUMBO\b|\bJumbo\b',      'J'),
-    ('HIPER',        r'\bHIPER\b|\bHiper\b',       'H'),
-    ('SANTA ISABEL', r'Santa Isabel|SANTA ISABEL', 'SI'),
-    ('TOTTUS',       r'\bTOTTUS\b|\bTottus\b',    'T'),
-    ('SMU',          r'\bSMU\b',                   'S'),
-    ('UNIMARC',      r'\bUnimarc\b|\bUNIMARC\b',  'U'),
+    ('SISA',         r'\bSisa\b|\bSISA\b',                          'N'),
+    ('JUMBO',        r'\bJUMBO\b|\bJumbo\b',                         'J'),
+    ('HIPER',        r'\bHIPER\b|\bHiper\b',                         'H'),
+    ('SANTA ISABEL', r'Santa Isabel|SANTA ISABEL',                   'SI'),
+    ('TOTTUS',       r'\bTOTTUS\b|\bTottus\b',                      'T'),
+    ('SMU',          r'\bSMU\b',                                      'S'),
+    ('UNIMARC',      r'\bUnimarc\b|\bUNIMARC\b',                    'U'),
+    ('EASY',         r'\bEasy\b|\bEASY\b',                           'E'),
+    ('SODIMAC',      r'\bSodimac\b|\bSODIMAC\b|\bHomecenter\b|\bHOMECENTER\b', 'SO'),
 ]
 
 BAD_WORDS = [
@@ -233,7 +236,8 @@ def is_store_message(text):
         return False
     # Rechazar patrón "CADENA - [texto libre]" → es un reporte, no identificador
     chain_stripped = re.sub(
-        r'\b(?:sisa|jumbo|hiper|santa isabel|tottus|smu|unimarc)\b', '', first, flags=re.IGNORECASE
+        r'\b(?:sisa|jumbo|hiper|santa isabel|tottus|smu|unimarc|easy|sodimac|homecenter)\b',
+        '', first, flags=re.IGNORECASE
     ).strip()
     if chain_stripped.startswith('- ') or chain_stripped.startswith('-\t'):
         return False
