@@ -507,6 +507,7 @@ function showResults(result, jobId) {
       <th style="padding:4px 8px;">Cadena</th>
       <th style="padding:4px 8px;">Tienda</th>
       <th style="padding:4px 8px;">Fecha</th>
+      <th style="padding:4px 8px;">Reportó</th>
       <th style="padding:4px 8px;text-align:center;">📷</th>
     </tr></thead>`;
     const tbody = document.createElement('tbody');
@@ -516,6 +517,7 @@ function showResults(result, jobId) {
       tr.innerHTML = `<td style="padding:3px 8px;">${s.chain}</td>
         <td style="padding:3px 8px;">${s.name}</td>
         <td style="padding:3px 8px;">${s.date}</td>
+        <td style="padding:3px 8px;font-size:0.75rem;">${s.sender||''}</td>
         <td style="padding:3px 8px;text-align:center;">${s.photos > 0 ? '✅ '+s.photos : '—'}</td>`;
       tbody.appendChild(tr);
     });
@@ -602,6 +604,7 @@ def upload():
                     'name': (s.get('db_nombre_sala') or s.get('address', ''))[:35],
                     'date': s['date'],
                     'photos': len(s.get('photos', [])),
+                    'sender': s.get('sender', '')[:25],
                 }
                 for s in result['stores']
             ]

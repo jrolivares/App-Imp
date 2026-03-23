@@ -302,18 +302,25 @@ def extract_stores(messages: list, start_date: datetime, end_date: datetime) -> 
             store_entries.append((i, chain, prefix, code, address, city, msg))
 
     # ── Fase 2: asignar fotos a tiendas ───────────────────────────────────────
-    # Para cada mensaje con fotos buscamos la tienda más reciente PRECEDENTE cuyo
-    # sender coincida (hasta 60 min atrás). Si no hay match por sender, usamos la
-    # tienda más reciente de cualquier sender (hasta 15 min atrás).
-    #   → Esto resuelve el caso "múltiples tiendas en ráfaga + fotos después":
-    #     cada implementador asocia SUS fotos a SU tienda.
     store_photos = defaultdict(list)   # store_entry_index → [filenames]
 
+    # Primero: fotos dentro del MISMO mensaje de tienda (enviadas juntas)
+    # Bug histórico: el loop de abajo hace break cuando i >= j, así que
+    # si la foto y la tienda están en el mismo mensaje (i==j) se perdía.
+    store_msg_indices = {i: k for k, (i, *_) in enumerate(store_entries)}
+    for j, msg in enumerate(recent):
+        if msg['photos'] and j in store_msg_indices:
+            store_photos[store_msg_indices[j]].extend(msg['photos'])
+
+    # Luego: fotos enviadas DESPUÉS del mensaje de tienda
+    unassigned = 0
     for j, msg in enumerate(recent):
         if not msg['photos']:
             continue
-        msg_dt = msg['dt']
+        if j in store_msg_indices:
+            continue   # ya capturadas arriba
 
+        msg_dt = msg['dt']
         best_same_sender = None   # (diff_seconds, entry_index)
         best_any_sender  = None
 
@@ -323,9 +330,9 @@ def extract_stores(messages: list, start_date: datetime, end_date: datetime) -> 
             diff = (msg_dt - smsg['dt']).total_seconds()
             if diff < 0:
                 continue
-            # Mismo sender → ventana de 2 horas
+            # Mismo sender → ventana de 8 horas (cubre jornada completa)
             if smsg['sender'] == msg['sender']:
-                if diff <= 7200:
+                if diff <= 28800:
                     if best_same_sender is None or diff < best_same_sender[0]:
                         best_same_sender = (diff, k)
             # Cualquier sender → ventana de 60 minutos
@@ -333,14 +340,14 @@ def extract_stores(messages: list, start_date: datetime, end_date: datetime) -> 
                 if best_any_sender is None or diff < best_any_sender[0]:
                     best_any_sender = (diff, k)
 
-        # Usar el más reciente entre los dos candidatos
-        if best_same_sender and best_any_sender:
-            target = best_same_sender if best_same_sender[0] <= best_any_sender[0] else best_any_sender
-        else:
-            target = best_same_sender or best_any_sender
-
+        # Same-sender siempre gana si existe (implementador asocia sus propias fotos)
+        target = best_same_sender or best_any_sender
         if target:
             store_photos[target[1]].extend(msg['photos'])
+        else:
+            unassigned += 1
+
+    print(f'[extract] fotos sin tienda asignada: {unassigned}', flush=True)
 
     # ── Fase 3: construir registros de tienda ─────────────────────────────────
     raw = []
