@@ -47,8 +47,9 @@ def load_store_db() -> list:
         rows = list(csv.reader(content.splitlines()))
         _store_db_cache = rows[1:]
         # Pre-normalizar una sola vez al cargar
+        # Índice: (nombre_norm, words_set, codigo_upper, row)
         _store_db_index = [
-            (_norm(row[5]), set(_norm(row[5]).split()), row)
+            (_norm(row[5]), set(_norm(row[5]).split()), row[2].strip().upper() if len(row) > 2 else '', row)
             for row in _store_db_cache if len(row) >= 9
         ]
         print(f'[store_db] {len(_store_db_cache)} tiendas cargadas.', flush=True)
@@ -59,13 +60,26 @@ def load_store_db() -> list:
     return _store_db_cache
 
 
-def lookup_store(query: str, chain: str = None):
+def _make_result(row, score):
+    return {
+        'cadena':      row[3],
+        'nombre_sala': row[5],
+        'comuna':      row[7],
+        'region':      row[8],
+        'score':       round(score, 3),
+    }
+
+
+def lookup_store(query: str, chain: str = None, code: str = None):
     """
-    Busca la tienda más parecida a *query* en el índice pre-normalizado.
-    - chain: cadena detectada en WhatsApp (ej. 'SISA', 'JUMBO') para filtrar
-             y evitar matches cruzados entre cadenas distintas.
+    Busca la tienda en el índice pre-normalizado.
+    Estrategia (en orden de prioridad):
+      1. Match exacto por código (col C) — máxima precisión para "local NNN"
+      2. Fuzzy match por nombre (col F) con filtro de cadena
+    - chain: cadena WhatsApp para filtrar filas por prefijo de nombre
+    - code:  código parseado (ej. 'H620', 'N123') para match directo
     """
-    cache_key = f"{chain}|{query}"
+    cache_key = f"{chain}|{code}|{query}"
     if cache_key in _lookup_cache:
         return _lookup_cache[cache_key]
 
@@ -74,21 +88,31 @@ def lookup_store(query: str, chain: str = None):
         _lookup_cache[cache_key] = None
         return None
 
-    q = _norm(query)
-    q_words = set(q.split())
-
-    # Prefijo de cadena para filtrar (primeras 4 letras normalizadas)
     chain_prefix = _norm(chain)[:4] if chain else None
 
+    # ── 1. Buscar por código exacto ───────────────────────────────────────────
+    if code:
+        code_up = code.upper().strip()
+        # También intentar sin el prefijo de cadena (ej. "620" además de "H620")
+        code_bare = re.sub(r'^[A-Z]+', '', code_up)
+        for nombre, nombre_words, db_code, row in _store_db_index:
+            if chain_prefix and not nombre.startswith(chain_prefix):
+                continue
+            if db_code and (db_code == code_up or db_code == code_bare):
+                result = _make_result(row, 1.0)
+                _lookup_cache[cache_key] = result
+                print(f'[lookup] código exacto {code_up} → {row[5]}', flush=True)
+                return result
+
+    # ── 2. Fuzzy match por nombre ─────────────────────────────────────────────
+    q = _norm(query)
+    q_words = set(q.split())
     best_score, best_row = 0.0, None
 
-    for nombre, nombre_words, row in _store_db_index:
-        # Filtrar por cadena: el Nombre Sala debe empezar con el prefijo de la cadena
+    for nombre, nombre_words, db_code, row in _store_db_index:
         if chain_prefix and not nombre.startswith(chain_prefix):
             continue
-        # 1) Word-overlap rápido
         overlap = len(q_words & nombre_words) / max(len(q_words), 1)
-        # 2) SequenceMatcher solo si overlap es prometedor
         if overlap > 0.3:
             ratio = difflib.SequenceMatcher(None, q, nombre).ratio()
         else:
@@ -101,13 +125,7 @@ def lookup_store(query: str, chain: str = None):
     THRESHOLD = 0.55
     result = None
     if best_score >= THRESHOLD and best_row is not None:
-        result = {
-            'cadena':      best_row[3],
-            'nombre_sala': best_row[5],
-            'comuna':      best_row[7],
-            'region':      best_row[8],
-            'score':       round(best_score, 3),
-        }
+        result = _make_result(best_row, best_score)
     _lookup_cache[cache_key] = result
     return result
 
@@ -236,9 +254,14 @@ def parse_store_line(text, chain, prefix):
     stripped = first
     for _, pat, _ in CHAIN_RULES:
         stripped = re.sub(pat, '', stripped, flags=re.IGNORECASE).strip(' ,\t')
+    # Patrón numérico al inicio: "123 Dirección"
     m = re.match(r'^(\d+)\s+(.+)$', stripped)
     if m:
         return prefix + m.group(1), m.group(2).strip(), ''
+    # Patrón "local NNN" o "líder local NNN" (usado por HIPER y otros)
+    m_local = re.search(r'\blocal[:\s]*(\d+)\b', stripped, re.IGNORECASE)
+    if m_local:
+        return prefix + m_local.group(1), stripped.strip(), ''
     return None, stripped.strip(), ''
 
 
@@ -324,9 +347,9 @@ def extract_stores(messages: list, start_date: datetime, end_date: datetime) -> 
         pl, bt, notes = parse_status(msg['text'])
         print(f'[extract] tienda={code or address[:30]!r} fotos={len(photos)}', flush=True)
 
-        # Buscar tienda en base de datos formal (filtrando por cadena)
+        # Buscar tienda en base de datos formal (código primero, luego fuzzy por nombre)
         query = f"{chain} {address}" if address else chain
-        db_match = lookup_store(query, chain=chain)
+        db_match = lookup_store(query, chain=chain, code=code)
 
         raw.append({
             'chain': chain, 'code': code, 'address': address, 'city': city,
