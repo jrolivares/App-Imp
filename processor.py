@@ -126,9 +126,14 @@ CHAIN_RULES = [
 BAD_WORDS = [
     # Operativos / logística
     'implementación', 'implementacion', 'botadero', 'payloader', 'payloder',
-    'material', 'ingreso', 'autorizar', 'abastece', 'abastecer', 'stock',
+    'material', 'ingreso', 'autorizar', 'autorización', 'autorizacion',
+    'abastece', 'abastecer', 'stock',
     'bodega', 'armar', 'solicita', 'solicitud', 'encargada', 'reponedor',
     'rechaza', 'pendiente', 'dejar', 'dejar en', 'nota en',
+    'espera', 'esperando',
+    # Docs / instructivos
+    'instructivo', 'manual', 'capacitación', 'capacitacion', 'pdf',
+    'páginas', 'paginas', 'documento',
     # Comunicación / saludo
     'campaña', 'correo', 'problema', 'aparece', 'quieren', 'fecha de término',
     'agregué', 'buen día', 'estará', 'porfa', 'enviados', 'si no',
@@ -196,12 +201,15 @@ def is_store_message(text):
     chain, _ = detect_chain(text)
     if not chain:
         return False
-    first = text.strip().split('\n')[0].lower()
+    lines = text.strip().split('\n')
+    first = lines[0].lower()
+    # Verificar también la segunda línea: mensajes como "JUMBO\nEn capacitación..."
+    # tienen la cadena sola en la primera línea → los bad words están en la segunda
+    check = first + (' ' + lines[1].lower() if len(lines) > 1 else '')
     # Rechazar si contiene palabras de reporte/logística
-    if any(b in first for b in BAD_WORDS):
+    if any(b in check for b in BAD_WORDS):
         return False
     # Rechazar patrón "CADENA - [texto libre]" → es un reporte, no identificador
-    # Ejemplo: "SISA - Implementación botadero..." / "JUMBO - En Independencia..."
     chain_stripped = re.sub(
         r'\b(?:sisa|jumbo|hiper|santa isabel|tottus|smu|unimarc)\b', '', first, flags=re.IGNORECASE
     ).strip()
@@ -293,8 +301,8 @@ def extract_stores(messages: list, start_date: datetime, end_date: datetime) -> 
                 if diff <= 7200:
                     if best_same_sender is None or diff < best_same_sender[0]:
                         best_same_sender = (diff, k)
-            # Cualquier sender → ventana de 60 minutos
-            if diff <= 3600:
+            # Cualquier sender → ventana de 30 minutos
+            if diff <= 1800:
                 if best_any_sender is None or diff < best_any_sender[0]:
                     best_any_sender = (diff, k)
 
@@ -331,10 +339,11 @@ def extract_stores(messages: list, start_date: datetime, end_date: datetime) -> 
             'db_comuna':      db_match['comuna']       if db_match else None,
             'db_region':      db_match['region']       if db_match else None,
         })
-    # Deduplicate
+    # Deduplicate: misma cadena + mismo nombre (oficial si hay, si no parseado) + misma fecha
     deduped = {}
     for s in raw:
-        key = f"{s['chain']}_{s['code'] or s['address'][:20]}"
+        name_key = s.get('db_nombre_sala') or s['code'] or s['address'][:25]
+        key = f"{s['chain']}_{name_key}_{s['date']}"
         if key in deduped:
             ex = deduped[key]
             merged = ex['photos'] + s['photos']
