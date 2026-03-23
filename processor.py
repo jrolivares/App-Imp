@@ -133,19 +133,63 @@ def lookup_store(query: str, chain: str = None, code: str = None):
     _lookup_cache[cache_key] = result
     return result
 
-CHAIN_ORDER = ['SISA', 'JUMBO', 'HIPER', 'SANTA ISABEL', 'TOTTUS', 'SMU', 'UNIMARC',
-               'EASY', 'SODIMAC']
+CHAIN_ORDER = [
+    'SISA', 'JUMBO', 'HIPER', 'SANTA ISABEL', 'TOTTUS', 'SMU', 'UNIMARC',
+    'EASY', 'SODIMAC',
+    'ALVI', 'CASANOVA', 'CENTRAL MAYORISTA', 'COMERCIAL CASTRO', 'CONSTRUMART',
+    'CORONA', 'CRUZ VERDE', 'CUGAT', 'DIMARC', 'EKONO', 'ELTIT',
+    'FALABELLA', 'FASA', 'HITES', 'KUNCAR',
+    'LA MUNDIAL', 'LA OFERTA', 'LA POLAR', 'LIQUIMAX', 'M10', 'MAICAO',
+    'OK MARKET', 'OXXO', 'PARIS', 'PREUNIC', 'PROVIMARKET',
+    'RIPLEY', 'SALCOBRAND', 'SUDAMERICANA',
+    'SUPER 10', 'SUPER OFERTA', 'TALEB', 'TEBA EXPRESS',
+]
 
 CHAIN_RULES = [
-    ('SISA',         r'\bSisa\b|\bSISA\b',                          'N'),
-    ('JUMBO',        r'\bJUMBO\b|\bJumbo\b',                         'J'),
-    ('HIPER',        r'\bHIPER\b|\bHiper\b',                         'H'),
-    ('SANTA ISABEL', r'Santa Isabel|SANTA ISABEL',                   'SI'),
-    ('TOTTUS',       r'\bTOTTUS\b|\bTottus\b',                      'T'),
-    ('SMU',          r'\bSMU\b',                                      'S'),
-    ('UNIMARC',      r'\bUnimarc\b|\bUNIMARC\b',                    'U'),
-    ('EASY',         r'\bEasy\b|\bEASY\b',                           'E'),
-    ('SODIMAC',      r'\bSodimac\b|\bSODIMAC\b|\bHomecenter\b|\bHOMECENTER\b', 'SO'),
+    # ── Cadenas originales ────────────────────────────────────────────────────
+    ('SISA',             r'\bSisa\b|\bSISA\b',                                   'N'),
+    ('JUMBO',            r'\bJUMBO\b|\bJumbo\b',                                 'J'),
+    ('HIPER',            r'\bHIPER\b|\bHiper\b',                                 'H'),
+    ('SANTA ISABEL',     r'Santa\s+Isabel|SANTA\s+ISABEL',                      'SI'),
+    ('TOTTUS',           r'\bTOTTUS\b|\bTottus\b',                              'T'),
+    ('SMU',              r'\bSMU\b',                                              'S'),
+    ('UNIMARC',          r'\bUnimarc\b|\bUNIMARC\b',                            'U'),
+    ('EASY',             r'\bEasy\b|\bEASY\b',                                   'E'),
+    ('SODIMAC',          r'\bSodimac\b|\bSODIMAC\b|\bHomecenter\b|\bHOMECENTER\b','SO'),
+    # ── Nuevas cadenas ────────────────────────────────────────────────────────
+    ('ALVI',             r'\bAlvi\b|\bALVI\b',                                   'AL'),
+    ('CASANOVA',         r'\bCasanova\b|\bCASANOVA\b',                          'CAS'),
+    ('CENTRAL MAYORISTA',r'Central\s+Mayorista|CENTRAL\s+MAYORISTA',            'CM'),
+    ('COMERCIAL CASTRO', r'Comercial\s+Castro|COMERCIAL\s+CASTRO',              'CC'),
+    ('CONSTRUMART',      r'\bConstrumart\b|\bCONSTRUMART\b',                    'CON'),
+    ('CORONA',           r'\bCorona\b|\bCORONA\b',                              'COR'),
+    ('CRUZ VERDE',       r'Cruz\s+Verde|CRUZ\s+VERDE',                          'CV'),
+    ('CUGAT',            r'\bCugat\b|\bCUGAT\b',                                'CUG'),
+    ('DIMARC',           r'\bDimarc\b|\bDIMARC\b',                              'DIM'),
+    ('EKONO',            r'\bEkono\b|\bEKONO\b',                                'EK'),
+    ('ELTIT',            r'\bEltit\b|\bELTIT\b',                                'ELT'),
+    ('FALABELLA',        r'\bFalabella\b|\bFALABELLA\b',                        'FAL'),
+    ('FASA',             r'\bFasa\b|\bFASA\b',                                   'FAS'),
+    ('HITES',            r'\bHites\b|\bHITES\b',                                'HIT'),
+    ('KUNCAR',           r'\bKuncar\b|\bKUNCAR\b',                              'KUN'),
+    ('LA MUNDIAL',       r'La\s+Mundial|LA\s+MUNDIAL',                          'LM'),
+    ('LA OFERTA',        r'La\s+Oferta|LA\s+OFERTA',                            'LO'),
+    ('LA POLAR',         r'La\s+Polar|LA\s+POLAR',                              'LP'),
+    ('LIQUIMAX',         r'\bLiquimax\b|\bLIQUIMAX\b',                          'LIQ'),
+    ('M10',              r'\bM10\b',                                              'M10'),
+    ('MAICAO',           r'\bMaicao\b|\bMAICAO\b',                              'MAI'),
+    ('OK MARKET',        r'Ok\s+Market|OK\s+MARKET|\bOkmarket\b',               'OK'),
+    ('OXXO',             r'\bOxxo\b|\bOXXO\b',                                   'OXX'),
+    ('PARIS',            r'\bParis\b|\bPARIS\b',                                'PAR'),
+    ('PREUNIC',          r'\bPreunic\b|\bPREUNIC\b',                            'PRE'),
+    ('PROVIMARKET',      r'\bProvimarket\b|\bPROVIMARKET\b',                    'PRO'),
+    ('RIPLEY',           r'\bRipley\b|\bRIPLEY\b',                              'RIP'),
+    ('SALCOBRAND',       r'\bSalcobrand\b|\bSALCOBRAND\b',                      'SAL'),
+    ('SUDAMERICANA',     r'\bSudamericana\b|\bSUDAMERICANA\b',                  'SUD'),
+    ('SUPER 10',         r'Super\s*10|SUPER\s*10',                              'S10'),
+    ('SUPER OFERTA',     r'Super\s+Oferta|SUPER\s+OFERTA',                      'SOF'),
+    ('TALEB',            r'\bTaleb\b|\bTALEB\b',                                'TAL'),
+    ('TEBA EXPRESS',     r'Teba\s+Express|TEBA\s+EXPRESS|\bTeba\b|\bTEBA\b',    'TE'),
 ]
 
 BAD_WORDS = [
@@ -236,7 +280,12 @@ def is_store_message(text):
         return False
     # Rechazar patrón "CADENA - [texto libre]" → es un reporte, no identificador
     chain_stripped = re.sub(
-        r'\b(?:sisa|jumbo|hiper|santa isabel|tottus|smu|unimarc|easy|sodimac|homecenter)\b',
+        r'\b(?:sisa|jumbo|hiper|santa\s+isabel|tottus|smu|unimarc|easy|sodimac|homecenter|'
+        r'alvi|casanova|central\s+mayorista|comercial\s+castro|construmart|corona|'
+        r'cruz\s+verde|cugat|dimarc|ekono|eltit|falabella|fasa|hites|kuncar|'
+        r'la\s+mundial|la\s+oferta|la\s+polar|liquimax|m10|maicao|'
+        r'ok\s+market|oxxo|paris|preunic|provimarket|ripley|salcobrand|sudamericana|'
+        r'super\s*10|super\s+oferta|taleb|teba(?:\s+express)?)\b',
         '', first, flags=re.IGNORECASE
     ).strip()
     if chain_stripped.startswith('- ') or chain_stripped.startswith('-\t'):
