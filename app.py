@@ -461,8 +461,9 @@ function showResults(result, jobId) {
   sec.style.display = 'block';
   submitBtn.disabled = false;
 
+  const withPhotos = result.stores_with_photos || 0;
   document.getElementById('results-title').textContent =
-    `✅ Presentación generada: ${result.total_slides} slides · ${result.total_stores} tiendas`;
+    `✅ Presentación generada: ${result.total_slides} slides · ${result.total_stores} tiendas · ${withPhotos} con fotos`;
 
   const grid = document.getElementById('chain-grid');
   grid.innerHTML = '';
@@ -493,6 +494,35 @@ function showResults(result, jobId) {
   });
 
   document.getElementById('download-btn').href = `/download/${jobId}`;
+
+  // Tabla de diagnóstico
+  if (result.store_diag && result.store_diag.length) {
+    const diagDiv = document.createElement('details');
+    diagDiv.style.cssText = 'margin-top:18px;font-size:0.82rem;color:#555;';
+    diagDiv.innerHTML = `<summary style="cursor:pointer;font-weight:700;color:#1e3a5f;padding:4px 0;">
+      🔍 Detalle de fotos por tienda (${withPhotos}/${result.total_stores} con fotos)</summary>`;
+    const tbl = document.createElement('table');
+    tbl.style.cssText = 'width:100%;border-collapse:collapse;margin-top:8px;';
+    tbl.innerHTML = `<thead><tr style="background:#f0f4ff;text-align:left;">
+      <th style="padding:4px 8px;">Cadena</th>
+      <th style="padding:4px 8px;">Tienda</th>
+      <th style="padding:4px 8px;">Fecha</th>
+      <th style="padding:4px 8px;text-align:center;">📷</th>
+    </tr></thead>`;
+    const tbody = document.createElement('tbody');
+    result.store_diag.forEach((s, idx) => {
+      const tr = document.createElement('tr');
+      tr.style.cssText = `background:${idx%2===0?'#fff':'#f8f9fa'};${s.photos===0?'color:#aaa':''}`;
+      tr.innerHTML = `<td style="padding:3px 8px;">${s.chain}</td>
+        <td style="padding:3px 8px;">${s.name}</td>
+        <td style="padding:3px 8px;">${s.date}</td>
+        <td style="padding:3px 8px;text-align:center;">${s.photos > 0 ? '✅ '+s.photos : '—'}</td>`;
+      tbody.appendChild(tr);
+    });
+    tbl.appendChild(tbody);
+    diagDiv.appendChild(tbl);
+    sec.appendChild(diagDiv);
+  }
 }
 </script>
 </body>
@@ -564,10 +594,23 @@ def upload():
                 str(zip_path), photos_dir, start_date, end_date,
                 template_path, output_path
             )
+            # Diagnóstico: fotos por tienda
+            stores_with_photos = sum(1 for s in result['stores'] if s.get('photos'))
+            store_diag = [
+                {
+                    'chain': s['chain'],
+                    'name': (s.get('db_nombre_sala') or s.get('address', ''))[:35],
+                    'date': s['date'],
+                    'photos': len(s.get('photos', [])),
+                }
+                for s in result['stores']
+            ]
             jobs[job_id]['result'] = {
                 'total_slides': result['total_slides'],
                 'total_stores': len(result['stores']),
+                'stores_with_photos': stores_with_photos,
                 'summary': result['summary'],
+                'store_diag': store_diag,
             }
             jobs[job_id]['status'] = 'done'
         except Exception as e:

@@ -288,17 +288,22 @@ def extract_stores(messages: list, start_date: datetime, end_date: datetime) -> 
             diff = (msg_dt - smsg['dt']).total_seconds()
             if diff < 0:
                 continue
-            # Mismo sender → ventana amplia (60 min)
+            # Mismo sender → ventana de 2 horas
             if smsg['sender'] == msg['sender']:
-                if diff <= 3600:
+                if diff <= 7200:
                     if best_same_sender is None or diff < best_same_sender[0]:
                         best_same_sender = (diff, k)
-            # Cualquier sender → ventana estrecha (15 min)
-            if diff <= 900:
+            # Cualquier sender → ventana de 60 minutos
+            if diff <= 3600:
                 if best_any_sender is None or diff < best_any_sender[0]:
                     best_any_sender = (diff, k)
 
-        target = best_same_sender or best_any_sender
+        # Usar el más reciente entre los dos candidatos
+        if best_same_sender and best_any_sender:
+            target = best_same_sender if best_same_sender[0] <= best_any_sender[0] else best_any_sender
+        else:
+            target = best_same_sender or best_any_sender
+
         if target:
             store_photos[target[1]].extend(msg['photos'])
 
