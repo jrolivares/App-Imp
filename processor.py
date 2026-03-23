@@ -135,7 +135,7 @@ def lookup_store(query: str, chain: str = None, code: str = None):
 
 CHAIN_ORDER = [
     'SISA', 'JUMBO', 'HIPER', 'SANTA ISABEL', 'TOTTUS', 'SMU', 'UNIMARC',
-    'EASY', 'SODIMAC', 'WALMART', 'ACUENTA',
+    'EASY', 'SODIMAC', 'LIDER', 'WALMART', 'ACUENTA',
     'ALVI', 'CASANOVA', 'CENTRAL MAYORISTA', 'COMERCIAL CASTRO', 'CONSTRUMART',
     'CORONA', 'CRUZ VERDE', 'CUGAT', 'DIMARC', 'EKONO', 'ELTIT',
     'FALABELLA', 'FASA', 'HITES', 'KUNCAR',
@@ -156,6 +156,7 @@ CHAIN_RULES = [
     ('UNIMARC',          r'\bUnimarc\b|\bUNIMARC\b',                            'U'),
     ('EASY',             r'\bEasy\b|\bEASY\b',                                   'E'),
     ('SODIMAC',          r'\bSodimac\b|\bSODIMAC\b|\bHomecenter\b|\bHOMECENTER\b','SO'),
+    ('LIDER',            r'\bL[ií]der\b|\bLIDER\b',                              'L'),
     ('WALMART',          r'\bWalmart\b|\bWALMART\b',                              'W'),
     ('ACUENTA',          r'\bAcuenta\b|\bACUENTA\b',                              'AC'),
     # ── Nuevas cadenas ────────────────────────────────────────────────────────
@@ -378,7 +379,7 @@ def extract_stores(messages: list, start_date: datetime, end_date: datetime) -> 
                 photo_timestamps[p] = msg['dt']
             store_photos[store_msg_indices[j]].extend(msg['photos'])
 
-    # Luego: fotos enviadas DESPUÉS del mensaje de tienda
+    # Luego: fotos enviadas ANTES o DESPUÉS del mensaje de tienda
     unassigned = 0
     for j, msg in enumerate(recent):
         if not msg['photos']:
@@ -387,27 +388,35 @@ def extract_stores(messages: list, start_date: datetime, end_date: datetime) -> 
             continue   # ya capturadas arriba
 
         msg_dt = msg['dt']
-        best_same_sender = None   # (diff_seconds, entry_index)
-        best_any_sender  = None
+        best_same_sender    = None   # foto DESPUÉS del ID, mismo sender  (8h)
+        best_any_sender     = None   # foto DESPUÉS del ID, cualquier sender (1h)
+        best_forward_sender = None   # foto ANTES del ID, mismo sender (5min)
+        # ↑ Cubre el patrón "Romina manda foto y luego escribe el nombre de la tienda"
 
         for k, (i, chain, prefix, code, address, city, smsg) in enumerate(store_entries):
-            if i >= j:
-                break  # solo tiendas reportadas ANTES de esta foto
-            diff = (msg_dt - smsg['dt']).total_seconds()
-            if diff < 0:
-                continue
-            # Mismo sender → ventana de 8 horas (cubre jornada completa)
-            if smsg['sender'] == msg['sender']:
-                if diff <= 28800:
-                    if best_same_sender is None or diff < best_same_sender[0]:
-                        best_same_sender = (diff, k)
-            # Cualquier sender → ventana de 60 minutos
-            if diff <= 3600:
-                if best_any_sender is None or diff < best_any_sender[0]:
-                    best_any_sender = (diff, k)
+            if i < j:
+                # Tienda ANTES de la foto (lógica original)
+                diff = (msg_dt - smsg['dt']).total_seconds()
+                if diff < 0:
+                    continue
+                if smsg['sender'] == msg['sender']:
+                    if diff <= 28800:
+                        if best_same_sender is None or diff < best_same_sender[0]:
+                            best_same_sender = (diff, k)
+                if diff <= 3600:
+                    if best_any_sender is None or diff < best_any_sender[0]:
+                        best_any_sender = (diff, k)
+            else:
+                # Tienda DESPUÉS de la foto (ventana hacia adelante)
+                diff_ahead = (smsg['dt'] - msg_dt).total_seconds()
+                if diff_ahead > 300:   # más de 5 min → cortar búsqueda
+                    break
+                if smsg['sender'] == msg['sender'] and diff_ahead >= 0:
+                    if best_forward_sender is None or diff_ahead < best_forward_sender[0]:
+                        best_forward_sender = (diff_ahead, k)
 
-        # Same-sender siempre gana si existe (implementador asocia sus propias fotos)
-        target = best_same_sender or best_any_sender
+        # Prioridades: mismo sender (hacia atrás) > mismo sender (hacia adelante) > cualquier sender
+        target = best_same_sender or best_forward_sender or best_any_sender
         if target:
             for p in msg['photos']:
                 photo_timestamps[p] = msg['dt']
