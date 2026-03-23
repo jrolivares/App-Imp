@@ -92,13 +92,17 @@ def lookup_store(query: str, chain: str = None, code: str = None):
 
     # ── 1. Buscar por código exacto ───────────────────────────────────────────
     if code:
-        code_up = code.upper().strip()
-        # También intentar sin el prefijo de cadena (ej. "620" además de "H620")
-        code_bare = re.sub(r'^[A-Z]+', '', code_up)
+        code_up   = code.upper().strip()                      # "H066"
+        code_bare = re.sub(r'^[A-Z]+', '', code_up)           # "066"
+        code_nz   = code_bare.lstrip('0') or '0'              # "66"  (sin ceros iniciales)
+        code_up_nz = re.sub(r'^([A-Z]+)', r'\1', code_up).rstrip('0').rstrip() # fallback
+        # Set de todas las variantes a probar
+        code_variants = {code_up, code_bare, code_nz,
+                         re.sub(r'(?<=[A-Z])0+', '', code_up)}  # "H066"→"H66"
         for nombre, nombre_words, db_code, row in _store_db_index:
             if chain_prefix and not nombre.startswith(chain_prefix):
                 continue
-            if db_code and (db_code == code_up or db_code == code_bare):
+            if db_code and db_code in code_variants:
                 result = _make_result(row, 1.0)
                 _lookup_cache[cache_key] = result
                 print(f'[lookup] código exacto {code_up} → {row[5]}', flush=True)
@@ -324,8 +328,8 @@ def extract_stores(messages: list, start_date: datetime, end_date: datetime) -> 
                 if diff <= 7200:
                     if best_same_sender is None or diff < best_same_sender[0]:
                         best_same_sender = (diff, k)
-            # Cualquier sender → ventana de 30 minutos
-            if diff <= 1800:
+            # Cualquier sender → ventana de 60 minutos
+            if diff <= 3600:
                 if best_any_sender is None or diff < best_any_sender[0]:
                     best_any_sender = (diff, k)
 
