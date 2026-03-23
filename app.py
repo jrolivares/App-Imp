@@ -24,7 +24,7 @@ app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2 GB
 
 BASE_DIR      = Path(__file__).parent
 UPLOAD_DIR    = Path(os.environ.get('UPLOAD_DIR', '/tmp/milka_uploads'))
-TEMPLATE_PPTX = BASE_DIR / 'Template_Ejemplo.pptx'
+TEMPLATE_PPTX = BASE_DIR / 'Termplate.pptx'
 
 try:
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
