@@ -135,7 +135,7 @@ def lookup_store(query: str, chain: str = None, code: str = None):
 
 CHAIN_ORDER = [
     'SISA', 'JUMBO', 'HIPER', 'SANTA ISABEL', 'TOTTUS', 'SMU', 'UNIMARC',
-    'EASY', 'SODIMAC',
+    'EASY', 'SODIMAC', 'WALMART', 'ACUENTA',
     'ALVI', 'CASANOVA', 'CENTRAL MAYORISTA', 'COMERCIAL CASTRO', 'CONSTRUMART',
     'CORONA', 'CRUZ VERDE', 'CUGAT', 'DIMARC', 'EKONO', 'ELTIT',
     'FALABELLA', 'FASA', 'HITES', 'KUNCAR',
@@ -156,6 +156,8 @@ CHAIN_RULES = [
     ('UNIMARC',          r'\bUnimarc\b|\bUNIMARC\b',                            'U'),
     ('EASY',             r'\bEasy\b|\bEASY\b',                                   'E'),
     ('SODIMAC',          r'\bSodimac\b|\bSODIMAC\b|\bHomecenter\b|\bHOMECENTER\b','SO'),
+    ('WALMART',          r'\bWalmart\b|\bWALMART\b',                              'W'),
+    ('ACUENTA',          r'\bAcuenta\b|\bACUENTA\b',                              'AC'),
     # ── Nuevas cadenas ────────────────────────────────────────────────────────
     ('ALVI',             r'\bAlvi\b|\bALVI\b',                                   'AL'),
     ('CASANOVA',         r'\bCasanova\b|\bCASANOVA\b',                          'CAS'),
@@ -272,24 +274,32 @@ def is_store_message(text):
         return False
     lines = text.strip().split('\n')
     first = lines[0].lower()
-    # Verificar también la segunda línea: mensajes como "JUMBO\nEn capacitación..."
-    # tienen la cadena sola en la primera línea → los bad words están en la segunda
-    check = first + (' ' + lines[1].lower() if len(lines) > 1 else '')
-    # Rechazar si contiene palabras de reporte/logística
-    if any(b in check for b in BAD_WORDS):
+
+    # Siempre rechazar si la PRIMERA línea tiene palabras de reporte/logística
+    if any(b in first for b in BAD_WORDS):
         return False
-    # Rechazar patrón "CADENA - [texto libre]" → es un reporte, no identificador
+
+    # Calcular qué queda de la primera línea después de quitar el nombre de cadena
     chain_stripped = re.sub(
-        r'\b(?:sisa|jumbo|hiper|santa\s+isabel|tottus|smu|unimarc|easy|sodimac|homecenter|'
-        r'alvi|casanova|central\s+mayorista|comercial\s+castro|construmart|corona|'
-        r'cruz\s+verde|cugat|dimarc|ekono|eltit|falabella|fasa|hites|kuncar|'
-        r'la\s+mundial|la\s+oferta|la\s+polar|liquimax|m10|maicao|'
-        r'ok\s+market|oxxo|paris|preunic|provimarket|ripley|salcobrand|sudamericana|'
-        r'super\s*10|super\s+oferta|taleb|teba(?:\s+express)?)\b',
+        r'\b(?:sisa|jumbo|hiper|lider|líder|santa\s+isabel|tottus|smu|unimarc|easy|'
+        r'sodimac|homecenter|walmart|acuenta|alvi|casanova|central\s+mayorista|'
+        r'comercial\s+castro|construmart|corona|cruz\s+verde|cugat|dimarc|ekono|eltit|'
+        r'falabella|fasa|hites|kuncar|la\s+mundial|la\s+oferta|la\s+polar|liquimax|'
+        r'm10|maicao|ok\s+market|oxxo|paris|preunic|provimarket|ripley|salcobrand|'
+        r'sudamericana|super\s*10|super\s+oferta|taleb|teba(?:\s+express)?)\b',
         '', first, flags=re.IGNORECASE
     ).strip()
+
+    # Solo revisar la SEGUNDA línea para bad words si la primera línea era únicamente
+    # el nombre de la cadena (sin dirección ni código), como "JUMBO\nEn capacitación..."
+    if len(lines) > 1 and not chain_stripped:
+        if any(b in lines[1].lower() for b in BAD_WORDS):
+            return False
+
+    # Rechazar patrón "CADENA - [texto libre]" → es un reporte, no identificador
     if chain_stripped.startswith('- ') or chain_stripped.startswith('-\t'):
         return False
+
     return True
 
 
