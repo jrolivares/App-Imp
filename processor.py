@@ -485,6 +485,9 @@ def open_corrected(img_path: str, max_px: int = 1200):
     Corrige orientación EXIF y reduce resolución solo si es necesario.
     - Si la foto ya es pequeña y no está rotada → devuelve None (usa archivo original, rápido).
     - Si necesita ajuste → devuelve BytesIO con imagen corregida.
+    Fallback: si después del EXIF la foto sigue siendo landscape (ancho > alto),
+    se rota 90° — las fotos de implementación son casi siempre portrait.
+    Solo aplica si el ratio es cercano a 3:4 (no panorámicas reales).
     """
     try:
         img = Image.open(img_path)   # lazy: no decodifica píxeles todavía
@@ -498,11 +501,22 @@ def open_corrected(img_path: str, max_px: int = 1200):
         needs_rotate = orientation not in (1, 0, None)
         needs_resize = img.width > max_px or img.height > max_px
 
-        if not needs_rotate and not needs_resize:
+        # Heurística: si sin EXIF la foto es landscape, revisar si necesita rotación
+        # Solo aplica a fotos con aspect ratio entre 1.1 y 2.0 (evita panorámicas reales)
+        ratio = img.width / img.height if img.height else 1
+        needs_heuristic_rotate = (not needs_rotate) and (1.1 < ratio < 2.0)
+
+        if not needs_rotate and not needs_resize and not needs_heuristic_rotate:
             return None   # sin cambios → usar archivo original directamente
 
         img.load()   # decodificar solo si realmente hay que modificar
         img = ImageOps.exif_transpose(img)
+
+        # Después del EXIF, aplicar heurística si sigue siendo landscape
+        if img.width > img.height and (1.1 < img.width / img.height < 2.0):
+            img = img.rotate(90, expand=True)
+            print(f'[img] rotación heurística aplicada a {os.path.basename(img_path)} ({img.width}x{img.height})', flush=True)
+
         if img.mode not in ('RGB', 'L'):
             img = img.convert('RGB')
         if img.width > max_px or img.height > max_px:

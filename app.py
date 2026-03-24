@@ -481,8 +481,22 @@ function showResults(result, jobId) {
     merged[display] = (merged[display] || 0) + count;
   });
 
-  const ORDER = ['SISA', 'JUMBO', 'HIPER LIDER', 'EXPRESS LIDER', 'TOTTUS', 'SMU'];
-  ORDER.forEach(chain => {
+  const ORDER = [
+    'SISA','JUMBO','HIPER LIDER','EXPRESS LIDER','TOTTUS','SMU',
+    'EASY','SODIMAC','LIDER','WALMART','ACUENTA',
+    'ALVI','CASANOVA','CENTRAL MAYORISTA','COMERCIAL CASTRO','CONSTRUMART',
+    'CORONA','CRUZ VERDE','CUGAT','DIMARC','EKONO','ELTIT',
+    'FALABELLA','FASA','HITES','KUNCAR',
+    'LA MUNDIAL','LA OFERTA','LA POLAR','LIQUIMAX','M10','MAICAO',
+    'OK MARKET','OXXO','PARIS','PREUNIC','PROVIMARKET',
+    'RIPLEY','SALCOBRAND','SUDAMERICANA',
+    'SUPER 10','SUPER OFERTA','TALEB','TEBA EXPRESS',
+  ];
+  // Mostrar cadenas en ORDER primero, luego cualquier otra que llegue
+  const shown = new Set();
+  [...ORDER, ...Object.keys(merged)].forEach(chain => {
+    if (shown.has(chain)) return;
+    shown.add(chain);
     const count = merged[chain];
     if (!count) return;
     const chip = document.createElement('div');
