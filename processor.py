@@ -485,9 +485,6 @@ def open_corrected(img_path: str, max_px: int = 1200):
     Corrige orientación EXIF y reduce resolución solo si es necesario.
     - Si la foto ya es pequeña y no está rotada → devuelve None (usa archivo original, rápido).
     - Si necesita ajuste → devuelve BytesIO con imagen corregida.
-    Fallback: si después del EXIF la foto sigue siendo landscape (ancho > alto),
-    se rota 90° — las fotos de implementación son casi siempre portrait.
-    Solo aplica si el ratio es cercano a 3:4 (no panorámicas reales).
     """
     try:
         img = Image.open(img_path)   # lazy: no decodifica píxeles todavía
@@ -501,24 +498,60 @@ def open_corrected(img_path: str, max_px: int = 1200):
         needs_rotate = orientation not in (1, 0, None)
         needs_resize = img.width > max_px or img.height > max_px
 
-        # Heurística: si sin EXIF la foto es landscape, revisar si necesita rotación
-        # Solo aplica a fotos con aspect ratio entre 1.1 y 2.0 (evita panorámicas reales)
-        ratio = img.width / img.height if img.height else 1
-        needs_heuristic_rotate = (not needs_rotate) and (1.1 < ratio < 2.0)
-
-        if not needs_rotate and not needs_resize and not needs_heuristic_rotate:
+        if not needs_rotate and not needs_resize:
             return None   # sin cambios → usar archivo original directamente
 
         img.load()   # decodificar solo si realmente hay que modificar
         img = ImageOps.exif_transpose(img)
-
-        # Después del EXIF, aplicar heurística si sigue siendo landscape
-        if img.width > img.height and (1.1 < img.width / img.height < 2.0):
-            img = img.rotate(90, expand=True)
-            print(f'[img] rotación heurística aplicada a {os.path.basename(img_path)} ({img.width}x{img.height})', flush=True)
-
         if img.mode not in ('RGB', 'L'):
             img = img.convert('RGB')
+        if img.width > max_px or img.height > max_px:
+            img.thumbnail((max_px, max_px), Image.LANCZOS)
+
+        buf = io.BytesIO()
+        img.save(buf, format='JPEG', quality=82)
+        buf.seek(0)
+        return buf
+    except Exception:
+        return None
+
+
+def fit_photo_to_slot(img_path: str, slot_w_emu: int, slot_h_emu: int, max_px: int = 1200) -> io.BytesIO:
+    """
+    Prepara una foto para insertarse en un slot del PPTX:
+    1. Corrige orientación EXIF.
+    2. Center-crop al mismo aspect ratio del slot (evita distorsión).
+    3. Reduce resolución si es necesario.
+    Siempre devuelve un BytesIO listo para usar.
+    """
+    try:
+        img = Image.open(img_path)
+        try:
+            orientation = (img.getexif() or {}).get(274, 1)
+        except Exception:
+            orientation = 1
+        img.load()
+        img = ImageOps.exif_transpose(img)
+        if img.mode not in ('RGB', 'L'):
+            img = img.convert('RGB')
+
+        # Center-crop al ratio del slot
+        target_ratio = slot_w_emu / slot_h_emu if slot_h_emu else 1
+        iw, ih = img.size
+        img_ratio = iw / ih if ih else 1
+
+        if abs(img_ratio - target_ratio) > 0.05:   # diferencia mayor al 5%
+            if img_ratio > target_ratio:
+                # foto más ancha que el slot → recortar lados
+                new_w = int(ih * target_ratio)
+                x0 = (iw - new_w) // 2
+                img = img.crop((x0, 0, x0 + new_w, ih))
+            else:
+                # foto más alta que el slot → recortar arriba/abajo
+                new_h = int(iw / target_ratio)
+                y0 = (ih - new_h) // 2
+                img = img.crop((0, y0, iw, y0 + new_h))
+
         if img.width > max_px or img.height > max_px:
             img.thumbnail((max_px, max_px), Image.LANCZOS)
 
@@ -701,7 +734,7 @@ def update_store_slide(slide, store, photos_dir, photo_index=None):
             photo_dt = photo_timestamps.get(photo_basename)
             photo_date = photo_dt.strftime('%d/%m/%Y') if photo_dt else fecha
             try:
-                img_src = open_corrected(img_path) or img_path
+                img_src = fit_photo_to_slot(img_path, w, h) or open_corrected(img_path) or img_path
                 slide.shapes.add_picture(img_src, left, top, w, h)
             except Exception as e:
                 print(f'[pptx] ERROR insertando foto {photo_basename}: {e}', flush=True)
