@@ -576,20 +576,36 @@ def fit_photo_to_slot(img_path: str, slot_w_emu: int, slot_h_emu: int, max_px: i
             print(f'[img-diag] {fname} diag-error: {diag_err}', flush=True)
 
         # ── Heurística de rotación basada en contenido ────────────────────────────
-        # Condición: orientation==1 significa que exif_transpose NO rotó nada.
-        # Aplica tanto a fotos sin EXIF como a Xiaomi/Android donde WhatsApp
-        # elimina el tag 274 pero deja el resto del EXIF intacto.
-        if orientation == 1 and w0 > h0:
+        # WhatsApp elimina el tag de orientación (274) sin rotar los píxeles.
+        # Detectamos el contenido mal-orientado comparando varianza de filas vs columnas.
+        #
+        # CASO A – landscape almacenada como portrait (w > h):
+        #   Contenido portrait (persona de pie) → estructuras verticales fuertes
+        #   → col_var >> row_var → col/row > 2.5 → rotar 90° CCW
+        #
+        # CASO B – portrait almacenada como landscape rotada (h > w):
+        #   Foto tomada landscape (estanterías horizontales) pero almacenada portrait
+        #   con los píxeles rotados 90° → estanterías aparecen verticales en la imagen
+        #   → row_var >> col_var → col/row < 1.0 → rotar 90° CW
+        #   (Problema confirmado con Xiaomi Redmi Note 11 Pro 5G via HyperOS/WhatsApp)
+        #
+        # Umbral col/row < 1.0 confirmado empíricamente: rotadas = 0.39–0.97, correctas ≥ 1.10
+        if orientation == 1:
             try:
                 rv, cv = _variance_stats(img)
                 ratio_vc = cv / rv if rv > 0 else 0
-                if ratio_vc > 2.5:
+                if w0 > h0 and ratio_vc > 2.5:
+                    # Caso A: portrait content stored landscape → rotate CCW
                     img = img.rotate(90, expand=True)
-                    print(f'[img] rotated CCW: {fname}'
+                    print(f'[img] rotated CCW (case A): {fname}'
                           f' ({w0}x{h0}→{img.size[0]}x{img.size[1]})'
                           f' col/row={ratio_vc:.2f}', flush=True)
-                else:
-                    print(f'[img] landscape ok (col/row={ratio_vc:.2f}): {fname}', flush=True)
+                elif h0 > w0 and ratio_vc < 1.0:
+                    # Caso B: landscape content stored portrait → rotate CW
+                    img = img.rotate(-90, expand=True)
+                    print(f'[img] rotated CW (case B): {fname}'
+                          f' ({w0}x{h0}→{img.size[0]}x{img.size[1]})'
+                          f' col/row={ratio_vc:.2f}', flush=True)
             except Exception:
                 pass
 
