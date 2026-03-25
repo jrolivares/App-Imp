@@ -583,20 +583,20 @@ def fit_photo_to_slot(img_path: str, slot_w_emu: int, slot_h_emu: int, max_px: i
         if img.mode not in ('RGB', 'L'):
             img = img.convert('RGB')
 
-        # ── Heurística portrait-sin-EXIF (basada en contenido) ───────────────────
-        # WhatsApp elimina EXIF sin rotar píxeles → fotos portrait quedan landscape.
-        # Detectamos esto comparando varianza de filas vs columnas en miniatura:
-        # contenido portrait almacenado landscape → estructuras verticales fuertes
-        # → col_var >> row_var. No depende del aspect ratio de la foto.
-        if not exif_has_data:
+        # ── Heurística portrait-sin-rotación (basada en contenido) ──────────────
+        # WhatsApp elimina el tag de orientación (274) sin rotar los píxeles.
+        # Esto pasa en dos casos:
+        #   • Fotos SIN EXIF: exif_has_data=False, orientation=1 → heurística activa
+        #   • Fotos CON EXIF pero sin tag 274 (ej. Xiaomi/Redmi via WhatsApp):
+        #     orientation=1 (default) → heurística activa
+        #   • Fotos CON EXIF y tag 274 != 1: exif_transpose ya corrigió → inactiva
+        # Condición: orientation == 1 (no hubo rotación EXIF aplicada).
+        if orientation == 1:
             w0, h0 = img.size
             if _portrait_stored_landscape(img):
                 img = img.rotate(90, expand=True)   # CCW → portrait content upright
                 print(f'[img] content-heuristic rotated: {os.path.basename(img_path)}'
                       f' ({w0}x{h0} → {img.size[0]}x{img.size[1]})', flush=True)
-            else:
-                print(f'[img] content-heuristic skipped (landscape ok): '
-                      f'{os.path.basename(img_path)} ({w0}x{h0})', flush=True)
 
         # Center-crop al ratio del slot
         target_ratio = slot_w_emu / slot_h_emu if slot_h_emu else 1
