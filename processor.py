@@ -516,64 +516,44 @@ def open_corrected(img_path: str, max_px: int = 1200):
         return None
 
 
-def _portrait_stored_landscape(img) -> bool:
+def _variance_stats(img):
     """
-    Detects portrait content stored as a landscape image (no EXIF) via
-    row/column variance analysis.
-
-    Portrait content rotated 90° and stored as landscape creates strong
-    VERTICAL structures → high column variance, low row variance.
-    Genuine landscape photos have row_var >= col_var.
-
-    Uses a 96×72 grayscale thumbnail for speed (< 1 ms per call).
-    Returns True if the image should be rotated 90° CCW to correct orientation.
+    Returns (mean_row_var, mean_col_var) on a 96×72 grayscale thumbnail.
+    Row variance = horizontal variation within each row.
+    Col variance = vertical variation within each column.
     """
-    w, h = img.size
-    if w <= h:          # already portrait or square → nothing to do
-        return False
-    try:
-        thumb = img.convert('L').resize((96, 72), Image.BOX)
-        tw, th = thumb.size
-        px = list(thumb.getdata())
-
-        # Mean variance across all rows (horizontal variation within each row)
-        total_row_var = 0.0
-        for r in range(th):
-            row = px[r * tw:(r + 1) * tw]
-            m = sum(row) / tw
-            total_row_var += sum((p - m) ** 2 for p in row) / tw
-        mean_row_var = total_row_var / th
-
-        # Mean variance across all columns (vertical variation within each column)
-        total_col_var = 0.0
-        for c in range(tw):
-            col = px[c::tw]      # stride tw selects column c
-            m = sum(col) / th
-            total_col_var += sum((p - m) ** 2 for p in col) / th
-        mean_col_var = total_col_var / tw
-
-        # Portrait stored landscape: columns carry much more variance than rows
-        # Threshold 2.5× chosen empirically (rotated: ~15-25×, correct: ~0.5-1.8×)
-        return mean_col_var > mean_row_var * 2.5
-    except Exception:
-        return False
+    thumb = img.convert('L').resize((96, 72), Image.BOX)
+    tw, th = thumb.size
+    px = list(thumb.getdata())
+    total_row_var = 0.0
+    for r in range(th):
+        row = px[r * tw:(r + 1) * tw]
+        m = sum(row) / tw
+        total_row_var += sum((p - m) ** 2 for p in row) / tw
+    total_col_var = 0.0
+    for c in range(tw):
+        col = px[c::tw]
+        m = sum(col) / th
+        total_col_var += sum((p - m) ** 2 for p in col) / th
+    return total_row_var / th, total_col_var / tw
 
 
 def fit_photo_to_slot(img_path: str, slot_w_emu: int, slot_h_emu: int, max_px: int = 1200) -> io.BytesIO:
     """
     Prepara una foto para insertarse en un slot del PPTX:
     1. Corrige orientación EXIF.
-    2. Heurística de contenido (sin EXIF): si columnas >> filas en varianza → foto portrait
+    2. Heurística de contenido: si columnas >> filas en varianza → foto portrait
        almacenada landscape → rota 90° CCW. Funciona independientemente del aspect ratio.
     3. Center-crop al mismo aspect ratio del slot (evita distorsión).
     4. Reduce resolución si es necesario.
     Siempre devuelve un BytesIO listo para usar.
     """
+    fname = os.path.basename(img_path)
     try:
         img = Image.open(img_path)
         try:
-            exif       = img.getexif() or {}
-            exif_has_data = len(exif) > 0   # True → EXIF present (proper camera/phone)
+            exif          = img.getexif() or {}
+            exif_has_data = len(exif) > 0
             orientation   = exif.get(274, 1)
         except Exception:
             exif_has_data = False
@@ -583,20 +563,35 @@ def fit_photo_to_slot(img_path: str, slot_w_emu: int, slot_h_emu: int, max_px: i
         if img.mode not in ('RGB', 'L'):
             img = img.convert('RGB')
 
-        # ── Heurística portrait-sin-rotación (basada en contenido) ──────────────
-        # WhatsApp elimina el tag de orientación (274) sin rotar los píxeles.
-        # Esto pasa en dos casos:
-        #   • Fotos SIN EXIF: exif_has_data=False, orientation=1 → heurística activa
-        #   • Fotos CON EXIF pero sin tag 274 (ej. Xiaomi/Redmi via WhatsApp):
-        #     orientation=1 (default) → heurística activa
-        #   • Fotos CON EXIF y tag 274 != 1: exif_transpose ya corrigió → inactiva
-        # Condición: orientation == 1 (no hubo rotación EXIF aplicada).
-        if orientation == 1:
-            w0, h0 = img.size
-            if _portrait_stored_landscape(img):
-                img = img.rotate(90, expand=True)   # CCW → portrait content upright
-                print(f'[img] content-heuristic rotated: {os.path.basename(img_path)}'
-                      f' ({w0}x{h0} → {img.size[0]}x{img.size[1]})', flush=True)
+        w0, h0 = img.size
+
+        # ── Diagnóstico: siempre loguear para depuración ──────────────────────────
+        try:
+            rv, cv = _variance_stats(img)
+            ratio_vc = cv / rv if rv > 0 else 0
+            print(f'[img-diag] {fname} size={w0}x{h0} exif={exif_has_data}'
+                  f' orient={orientation} row_var={rv:.1f} col_var={cv:.1f}'
+                  f' col/row={ratio_vc:.2f}', flush=True)
+        except Exception as diag_err:
+            print(f'[img-diag] {fname} diag-error: {diag_err}', flush=True)
+
+        # ── Heurística de rotación basada en contenido ────────────────────────────
+        # Condición: orientation==1 significa que exif_transpose NO rotó nada.
+        # Aplica tanto a fotos sin EXIF como a Xiaomi/Android donde WhatsApp
+        # elimina el tag 274 pero deja el resto del EXIF intacto.
+        if orientation == 1 and w0 > h0:
+            try:
+                rv, cv = _variance_stats(img)
+                ratio_vc = cv / rv if rv > 0 else 0
+                if ratio_vc > 2.5:
+                    img = img.rotate(90, expand=True)
+                    print(f'[img] rotated CCW: {fname}'
+                          f' ({w0}x{h0}→{img.size[0]}x{img.size[1]})'
+                          f' col/row={ratio_vc:.2f}', flush=True)
+                else:
+                    print(f'[img] landscape ok (col/row={ratio_vc:.2f}): {fname}', flush=True)
+            except Exception:
+                pass
 
         # Center-crop al ratio del slot
         target_ratio = slot_w_emu / slot_h_emu if slot_h_emu else 1
