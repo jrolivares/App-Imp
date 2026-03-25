@@ -516,13 +516,55 @@ def open_corrected(img_path: str, max_px: int = 1200):
         return None
 
 
+def _portrait_stored_landscape(img) -> bool:
+    """
+    Detects portrait content stored as a landscape image (no EXIF) via
+    row/column variance analysis.
+
+    Portrait content rotated 90° and stored as landscape creates strong
+    VERTICAL structures → high column variance, low row variance.
+    Genuine landscape photos have row_var >= col_var.
+
+    Uses a 96×72 grayscale thumbnail for speed (< 1 ms per call).
+    Returns True if the image should be rotated 90° CCW to correct orientation.
+    """
+    w, h = img.size
+    if w <= h:          # already portrait or square → nothing to do
+        return False
+    try:
+        thumb = img.convert('L').resize((96, 72), Image.BOX)
+        tw, th = thumb.size
+        px = list(thumb.getdata())
+
+        # Mean variance across all rows (horizontal variation within each row)
+        total_row_var = 0.0
+        for r in range(th):
+            row = px[r * tw:(r + 1) * tw]
+            m = sum(row) / tw
+            total_row_var += sum((p - m) ** 2 for p in row) / tw
+        mean_row_var = total_row_var / th
+
+        # Mean variance across all columns (vertical variation within each column)
+        total_col_var = 0.0
+        for c in range(tw):
+            col = px[c::tw]      # stride tw selects column c
+            m = sum(col) / th
+            total_col_var += sum((p - m) ** 2 for p in col) / th
+        mean_col_var = total_col_var / tw
+
+        # Portrait stored landscape: columns carry much more variance than rows
+        # Threshold 2.5× chosen empirically (rotated: ~15-25×, correct: ~0.5-1.8×)
+        return mean_col_var > mean_row_var * 2.5
+    except Exception:
+        return False
+
+
 def fit_photo_to_slot(img_path: str, slot_w_emu: int, slot_h_emu: int, max_px: int = 1200) -> io.BytesIO:
     """
     Prepara una foto para insertarse en un slot del PPTX:
     1. Corrige orientación EXIF.
-    2. Heurística: si EXIF está completamente ausente Y ratio > 1.55, rota 90° CCW.
-       Cubre fotos portrait guardadas landscape por WhatsApp sin metadata EXIF.
-       (16:9 portrait almacenado = 1.78, 3:2 = 1.5; 4:3 landscape genuino = 1.33 → intacto)
+    2. Heurística de contenido (sin EXIF): si columnas >> filas en varianza → foto portrait
+       almacenada landscape → rota 90° CCW. Funciona independientemente del aspect ratio.
     3. Center-crop al mismo aspect ratio del slot (evita distorsión).
     4. Reduce resolución si es necesario.
     Siempre devuelve un BytesIO listo para usar.
@@ -541,21 +583,20 @@ def fit_photo_to_slot(img_path: str, slot_w_emu: int, slot_h_emu: int, max_px: i
         if img.mode not in ('RGB', 'L'):
             img = img.convert('RGB')
 
-        # ── Heurística portrait-sin-EXIF ─────────────────────────────────────────
-        # Cuando WhatsApp elimina el EXIF sin rotar los píxeles, las fotos portrait
-        # (tomadas con el celular vertical) quedan guardadas landscape.
-        # • 4:3 portrait guardado landscape → ratio 1.33 → IGUAL a un landscape 4:3 genuino
-        #   → no se puede distinguir; se deja sin rotar (falso positivo sería peor).
-        # • 16:9 portrait guardado landscape → ratio 1.78 → claramente por encima de 1.55
-        #   → rotamos 90° CCW para devolver el contenido a portrait antes del center-crop.
-        # • Fotos con EXIF (iPhones, cámaras) → exif_has_data=True → heurística inactiva.
+        # ── Heurística portrait-sin-EXIF (basada en contenido) ───────────────────
+        # WhatsApp elimina EXIF sin rotar píxeles → fotos portrait quedan landscape.
+        # Detectamos esto comparando varianza de filas vs columnas en miniatura:
+        # contenido portrait almacenado landscape → estructuras verticales fuertes
+        # → col_var >> row_var. No depende del aspect ratio de la foto.
         if not exif_has_data:
             w0, h0 = img.size
-            ratio0 = w0 / h0 if h0 else 1
-            if ratio0 > 1.55:
+            if _portrait_stored_landscape(img):
                 img = img.rotate(90, expand=True)   # CCW → portrait content upright
-                print(f'[img] portrait-heuristic applied: {os.path.basename(img_path)}'
+                print(f'[img] content-heuristic rotated: {os.path.basename(img_path)}'
                       f' ({w0}x{h0} → {img.size[0]}x{img.size[1]})', flush=True)
+            else:
+                print(f'[img] content-heuristic skipped (landscape ok): '
+                      f'{os.path.basename(img_path)} ({w0}x{h0})', flush=True)
 
         # Center-crop al ratio del slot
         target_ratio = slot_w_emu / slot_h_emu if slot_h_emu else 1
