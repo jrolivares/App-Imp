@@ -174,6 +174,11 @@ HTML = r"""<!DOCTYPE html>
     padding: 3px 11px; transition: opacity .3s;
   }
   .prog-speed.hidden { opacity: 0; pointer-events: none; }
+  @keyframes barPulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: .55; }
+  }
+  .progress-bar.pulsing { animation: barPulse 1.4s ease-in-out infinite; }
 
   /* Results */
   #results-section { display: none; margin-top: 28px; }
@@ -447,7 +452,16 @@ function uploadXHR(formData) {
       }
     });
 
+    // Archivo enviado — ahora espera que el servidor procese y responda
+    xhr.upload.addEventListener('loadend', () => {
+      document.getElementById('prog-phase').textContent  = '📤 Archivo enviado';
+      document.getElementById('prog-detail').textContent = 'El servidor está recibiendo el archivo…';
+      document.getElementById('prog-speed').classList.add('hidden');
+      document.getElementById('progress-bar').classList.add('pulsing');
+    });
+
     xhr.addEventListener('load', () => {
+      document.getElementById('progress-bar').classList.remove('pulsing');
       if (xhr.status === 413) return reject(new Error('El archivo ZIP es demasiado grande para el servidor'));
       if (xhr.status < 200 || xhr.status >= 300) return reject(new Error('Error del servidor (' + xhr.status + ')'));
       resolve(xhr);
