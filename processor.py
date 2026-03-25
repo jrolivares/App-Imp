@@ -916,15 +916,38 @@ def generate_pptx(stores: list, photos_dir: str, template_path: str, output_path
 def process_zip(zip_path: str, photos_dir: str, start_date: datetime,
                 end_date: datetime, template_path: str, output_path: str) -> dict:
     """Full pipeline: unzip → parse → generate PPTX. Returns result dict."""
-    # Extract ZIP
+    photos_dir = Path(photos_dir)
+    photos_dir.mkdir(parents=True, exist_ok=True)
+
+    # Extract ZIP, stripping any top-level subfolder and __MACOSX junk.
+    # WhatsApp ZIPs exported from iOS/macOS wrap everything in a subfolder like
+    # "WhatsApp Chat - Grupo XYZ/" and add "__MACOSX/" metadata entries.
     with zipfile.ZipFile(zip_path, 'r') as zf:
-        zf.extractall(photos_dir)
+        for member in zf.infolist():
+            # Skip macOS metadata
+            if '__MACOSX' in member.filename or member.filename.startswith('.'):
+                continue
+            parts = Path(member.filename).parts
+            # Strip leading subfolder if all files share one (iOS export style)
+            stripped = Path(*parts[1:]) if len(parts) > 1 else Path(parts[0])
+            target = photos_dir / stripped
+            if member.filename.endswith('/'):
+                target.mkdir(parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(zf.read(member.filename))
 
-    # Find _chat.txt
-    chat_file = Path(photos_dir) / '_chat.txt'
+    # Find _chat.txt (may be at root or one level deep after stripping)
+    chat_file = photos_dir / '_chat.txt'
     if not chat_file.exists():
-        raise FileNotFoundError('No se encontró _chat.txt en el ZIP')
+        # Fallback: search recursively
+        found = list(photos_dir.rglob('_chat.txt'))
+        if found:
+            chat_file = found[0]
+        else:
+            raise FileNotFoundError('No se encontró _chat.txt en el ZIP')
 
+    photos_dir = str(photos_dir)   # rest of pipeline expects str
     chat_text = chat_file.read_text(encoding='utf-8', errors='replace')
     messages = parse_messages(chat_text)
     stores = extract_stores(messages, start_date, end_date)
