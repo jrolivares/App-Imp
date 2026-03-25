@@ -47,8 +47,9 @@ def load_store_db() -> list:
         rows = list(csv.reader(content.splitlines()))
         _store_db_cache = rows[1:]
         # Pre-normalizar una sola vez al cargar
+        # Índice: (nombre_norm, words_set, codigo_upper, row)
         _store_db_index = [
-            (_norm(row[5]), set(_norm(row[5]).split()), row)
+            (_norm(row[5]), set(_norm(row[5]).split()), row[2].strip().upper() if len(row) > 2 else '', row)
             for row in _store_db_cache if len(row) >= 9
         ]
         print(f'[store_db] {len(_store_db_cache)} tiendas cargadas.', flush=True)
@@ -59,13 +60,26 @@ def load_store_db() -> list:
     return _store_db_cache
 
 
-def lookup_store(query: str, chain: str = None):
+def _make_result(row, score):
+    return {
+        'cadena':      row[3],
+        'nombre_sala': row[5],
+        'comuna':      row[7],
+        'region':      row[8],
+        'score':       round(score, 3),
+    }
+
+
+def lookup_store(query: str, chain: str = None, code: str = None):
     """
-    Busca la tienda más parecida a *query* en el índice pre-normalizado.
-    - chain: cadena detectada en WhatsApp (ej. 'SISA', 'JUMBO') para filtrar
-             y evitar matches cruzados entre cadenas distintas.
+    Busca la tienda en el índice pre-normalizado.
+    Estrategia (en orden de prioridad):
+      1. Match exacto por código (col C) — máxima precisión para "local NNN"
+      2. Fuzzy match por nombre (col F) con filtro de cadena
+    - chain: cadena WhatsApp para filtrar filas por prefijo de nombre
+    - code:  código parseado (ej. 'H620', 'N123') para match directo
     """
-    cache_key = f"{chain}|{query}"
+    cache_key = f"{chain}|{code}|{query}"
     if cache_key in _lookup_cache:
         return _lookup_cache[cache_key]
 
@@ -74,21 +88,35 @@ def lookup_store(query: str, chain: str = None):
         _lookup_cache[cache_key] = None
         return None
 
-    q = _norm(query)
-    q_words = set(q.split())
-
-    # Prefijo de cadena para filtrar (primeras 4 letras normalizadas)
     chain_prefix = _norm(chain)[:4] if chain else None
 
+    # ── 1. Buscar por código exacto ───────────────────────────────────────────
+    if code:
+        code_up   = code.upper().strip()                      # "H066"
+        code_bare = re.sub(r'^[A-Z]+', '', code_up)           # "066"
+        code_nz   = code_bare.lstrip('0') or '0'              # "66"  (sin ceros iniciales)
+        code_up_nz = re.sub(r'^([A-Z]+)', r'\1', code_up).rstrip('0').rstrip() # fallback
+        # Set de todas las variantes a probar
+        code_variants = {code_up, code_bare, code_nz,
+                         re.sub(r'(?<=[A-Z])0+', '', code_up)}  # "H066"→"H66"
+        for nombre, nombre_words, db_code, row in _store_db_index:
+            if chain_prefix and not nombre.startswith(chain_prefix):
+                continue
+            if db_code and db_code in code_variants:
+                result = _make_result(row, 1.0)
+                _lookup_cache[cache_key] = result
+                print(f'[lookup] código exacto {code_up} → {row[5]}', flush=True)
+                return result
+
+    # ── 2. Fuzzy match por nombre ─────────────────────────────────────────────
+    q = _norm(query)
+    q_words = set(q.split())
     best_score, best_row = 0.0, None
 
-    for nombre, nombre_words, row in _store_db_index:
-        # Filtrar por cadena: el Nombre Sala debe empezar con el prefijo de la cadena
+    for nombre, nombre_words, db_code, row in _store_db_index:
         if chain_prefix and not nombre.startswith(chain_prefix):
             continue
-        # 1) Word-overlap rápido
         overlap = len(q_words & nombre_words) / max(len(q_words), 1)
-        # 2) SequenceMatcher solo si overlap es prometedor
         if overlap > 0.3:
             ratio = difflib.SequenceMatcher(None, q, nombre).ratio()
         else:
@@ -101,34 +129,83 @@ def lookup_store(query: str, chain: str = None):
     THRESHOLD = 0.55
     result = None
     if best_score >= THRESHOLD and best_row is not None:
-        result = {
-            'cadena':      best_row[3],
-            'nombre_sala': best_row[5],
-            'comuna':      best_row[7],
-            'region':      best_row[8],
-            'score':       round(best_score, 3),
-        }
+        result = _make_result(best_row, best_score)
     _lookup_cache[cache_key] = result
     return result
 
-CHAIN_ORDER = ['SISA', 'JUMBO', 'HIPER', 'SANTA ISABEL', 'TOTTUS', 'SMU', 'UNIMARC']
+CHAIN_ORDER = [
+    'SISA', 'JUMBO', 'HIPER', 'SANTA ISABEL', 'TOTTUS', 'SMU', 'UNIMARC',
+    'EASY', 'SODIMAC', 'LIDER', 'WALMART', 'ACUENTA',
+    'ALVI', 'CASANOVA', 'CENTRAL MAYORISTA', 'COMERCIAL CASTRO', 'CONSTRUMART',
+    'CORONA', 'CRUZ VERDE', 'CUGAT', 'DIMARC', 'EKONO', 'ELTIT',
+    'FALABELLA', 'FASA', 'HITES', 'KUNCAR',
+    'LA MUNDIAL', 'LA OFERTA', 'LA POLAR', 'LIQUIMAX', 'M10', 'MAICAO',
+    'OK MARKET', 'OXXO', 'PARIS', 'PREUNIC', 'PROVIMARKET',
+    'RIPLEY', 'SALCOBRAND', 'SUDAMERICANA',
+    'SUPER 10', 'SUPER OFERTA', 'TALEB', 'TEBA EXPRESS',
+]
 
 CHAIN_RULES = [
-    ('SISA',         r'\bSisa\b|\bSISA\b',       'N'),
-    ('JUMBO',        r'\bJUMBO\b|\bJumbo\b',      'J'),
-    ('HIPER',        r'\bHIPER\b|\bHiper\b',       'H'),
-    ('SANTA ISABEL', r'Santa Isabel|SANTA ISABEL', 'SI'),
-    ('TOTTUS',       r'\bTOTTUS\b|\bTottus\b',    'T'),
-    ('SMU',          r'\bSMU\b',                   'S'),
-    ('UNIMARC',      r'\bUnimarc\b|\bUNIMARC\b',  'U'),
+    # ── Cadenas originales ────────────────────────────────────────────────────
+    ('SISA',             r'\bSisa\b|\bSISA\b',                                   'N'),
+    ('JUMBO',            r'\bJUMBO\b|\bJumbo\b',                                 'J'),
+    ('HIPER',            r'\bHIPER\b|\bHiper\b',                                 'H'),
+    ('SANTA ISABEL',     r'Santa\s+Isabel|SANTA\s+ISABEL',                      'SI'),
+    ('TOTTUS',           r'\bTOTTUS\b|\bTottus\b',                              'T'),
+    ('SMU',              r'\bSMU\b',                                              'S'),
+    ('UNIMARC',          r'\bUnimarc\b|\bUNIMARC\b',                            'U'),
+    ('EASY',             r'\bEasy\b|\bEASY\b',                                   'E'),
+    ('SODIMAC',          r'\bSodimac\b|\bSODIMAC\b|\bHomecenter\b|\bHOMECENTER\b','SO'),
+    ('LIDER',            r'\bL[ií]der\b|\bLIDER\b',                              'L'),
+    ('WALMART',          r'\bWalmart\b|\bWALMART\b',                              'W'),
+    ('ACUENTA',          r'\bAcuenta\b|\bACUENTA\b',                              'AC'),
+    # ── Nuevas cadenas ────────────────────────────────────────────────────────
+    ('ALVI',             r'\bAlvi\b|\bALVI\b',                                   'AL'),
+    ('CASANOVA',         r'\bCasanova\b|\bCASANOVA\b',                          'CAS'),
+    ('CENTRAL MAYORISTA',r'Central\s+Mayorista|CENTRAL\s+MAYORISTA',            'CM'),
+    ('COMERCIAL CASTRO', r'Comercial\s+Castro|COMERCIAL\s+CASTRO',              'CC'),
+    ('CONSTRUMART',      r'\bConstrumart\b|\bCONSTRUMART\b',                    'CON'),
+    ('CORONA',           r'\bCorona\b|\bCORONA\b',                              'COR'),
+    ('CRUZ VERDE',       r'Cruz\s+Verde|CRUZ\s+VERDE',                          'CV'),
+    ('CUGAT',            r'\bCugat\b|\bCUGAT\b',                                'CUG'),
+    ('DIMARC',           r'\bDimarc\b|\bDIMARC\b',                              'DIM'),
+    ('EKONO',            r'\bEkono\b|\bEKONO\b',                                'EK'),
+    ('ELTIT',            r'\bEltit\b|\bELTIT\b',                                'ELT'),
+    ('FALABELLA',        r'\bFalabella\b|\bFALABELLA\b',                        'FAL'),
+    ('FASA',             r'\bFasa\b|\bFASA\b',                                   'FAS'),
+    ('HITES',            r'\bHites\b|\bHITES\b',                                'HIT'),
+    ('KUNCAR',           r'\bKuncar\b|\bKUNCAR\b',                              'KUN'),
+    ('LA MUNDIAL',       r'La\s+Mundial|LA\s+MUNDIAL',                          'LM'),
+    ('LA OFERTA',        r'La\s+Oferta|LA\s+OFERTA',                            'LO'),
+    ('LA POLAR',         r'La\s+Polar|LA\s+POLAR',                              'LP'),
+    ('LIQUIMAX',         r'\bLiquimax\b|\bLIQUIMAX\b',                          'LIQ'),
+    ('M10',              r'\bM10\b',                                              'M10'),
+    ('MAICAO',           r'\bMaicao\b|\bMAICAO\b',                              'MAI'),
+    ('OK MARKET',        r'Ok\s+Market|OK\s+MARKET|\bOkmarket\b',               'OK'),
+    ('OXXO',             r'\bOxxo\b|\bOXXO\b',                                   'OXX'),
+    ('PARIS',            r'\bParis\b|\bPARIS\b',                                'PAR'),
+    ('PREUNIC',          r'\bPreunic\b|\bPREUNIC\b',                            'PRE'),
+    ('PROVIMARKET',      r'\bProvimarket\b|\bPROVIMARKET\b',                    'PRO'),
+    ('RIPLEY',           r'\bRipley\b|\bRIPLEY\b',                              'RIP'),
+    ('SALCOBRAND',       r'\bSalcobrand\b|\bSALCOBRAND\b',                      'SAL'),
+    ('SUDAMERICANA',     r'\bSudamericana\b|\bSUDAMERICANA\b',                  'SUD'),
+    ('SUPER 10',         r'Super\s*10|SUPER\s*10',                              'S10'),
+    ('SUPER OFERTA',     r'Super\s+Oferta|SUPER\s+OFERTA',                      'SOF'),
+    ('TALEB',            r'\bTaleb\b|\bTALEB\b',                                'TAL'),
+    ('TEBA EXPRESS',     r'Teba\s+Express|TEBA\s+EXPRESS|\bTeba\b|\bTEBA\b',    'TE'),
 ]
 
 BAD_WORDS = [
     # Operativos / logística
     'implementación', 'implementacion', 'botadero', 'payloader', 'payloder',
-    'material', 'ingreso', 'autorizar', 'abastece', 'abastecer', 'stock',
+    'material', 'ingreso', 'autorizar', 'autorización', 'autorizacion',
+    'abastece', 'abastecer', 'stock',
     'bodega', 'armar', 'solicita', 'solicitud', 'encargada', 'reponedor',
     'rechaza', 'pendiente', 'dejar', 'dejar en', 'nota en',
+    'espera', 'esperando',
+    # Docs / instructivos
+    'instructivo', 'manual', 'capacitación', 'capacitacion', 'pdf',
+    'páginas', 'paginas', 'documento',
     # Comunicación / saludo
     'campaña', 'correo', 'problema', 'aparece', 'quieren', 'fecha de término',
     'agregué', 'buen día', 'estará', 'porfa', 'enviados', 'si no',
@@ -196,17 +273,34 @@ def is_store_message(text):
     chain, _ = detect_chain(text)
     if not chain:
         return False
-    first = text.strip().split('\n')[0].lower()
-    # Rechazar si contiene palabras de reporte/logística
+    lines = text.strip().split('\n')
+    first = lines[0].lower()
+
+    # Siempre rechazar si la PRIMERA línea tiene palabras de reporte/logística
     if any(b in first for b in BAD_WORDS):
         return False
-    # Rechazar patrón "CADENA - [texto libre]" → es un reporte, no identificador
-    # Ejemplo: "SISA - Implementación botadero..." / "JUMBO - En Independencia..."
+
+    # Calcular qué queda de la primera línea después de quitar el nombre de cadena
     chain_stripped = re.sub(
-        r'\b(?:sisa|jumbo|hiper|santa isabel|tottus|smu|unimarc)\b', '', first, flags=re.IGNORECASE
+        r'\b(?:sisa|jumbo|hiper|lider|líder|santa\s+isabel|tottus|smu|unimarc|easy|'
+        r'sodimac|homecenter|walmart|acuenta|alvi|casanova|central\s+mayorista|'
+        r'comercial\s+castro|construmart|corona|cruz\s+verde|cugat|dimarc|ekono|eltit|'
+        r'falabella|fasa|hites|kuncar|la\s+mundial|la\s+oferta|la\s+polar|liquimax|'
+        r'm10|maicao|ok\s+market|oxxo|paris|preunic|provimarket|ripley|salcobrand|'
+        r'sudamericana|super\s*10|super\s+oferta|taleb|teba(?:\s+express)?)\b',
+        '', first, flags=re.IGNORECASE
     ).strip()
+
+    # Solo revisar la SEGUNDA línea para bad words si la primera línea era únicamente
+    # el nombre de la cadena (sin dirección ni código), como "JUMBO\nEn capacitación..."
+    if len(lines) > 1 and not chain_stripped:
+        if any(b in lines[1].lower() for b in BAD_WORDS):
+            return False
+
+    # Rechazar patrón "CADENA - [texto libre]" → es un reporte, no identificador
     if chain_stripped.startswith('- ') or chain_stripped.startswith('-\t'):
         return False
+
     return True
 
 
@@ -228,9 +322,14 @@ def parse_store_line(text, chain, prefix):
     stripped = first
     for _, pat, _ in CHAIN_RULES:
         stripped = re.sub(pat, '', stripped, flags=re.IGNORECASE).strip(' ,\t')
+    # Patrón numérico al inicio: "123 Dirección"
     m = re.match(r'^(\d+)\s+(.+)$', stripped)
     if m:
         return prefix + m.group(1), m.group(2).strip(), ''
+    # Patrón "local NNN" o "líder local NNN" (usado por HIPER y otros)
+    m_local = re.search(r'\blocal[:\s]*(\d+)\b', stripped, re.IGNORECASE)
+    if m_local:
+        return prefix + m_local.group(1), stripped.strip(), ''
     return None, stripped.strip(), ''
 
 
@@ -257,49 +356,113 @@ def parse_status(text):
 
 def extract_stores(messages: list, start_date: datetime, end_date: datetime) -> list:
     recent = [m for m in messages if start_date <= m['dt'] < end_date]
-    raw = []
+
+    # ── Fase 1: identificar todos los mensajes de tienda ──────────────────────
+    store_entries = []   # (msg_index, chain, prefix, code, address, city, msg)
     for i, msg in enumerate(recent):
-        if not is_store_message(msg['text']):
+        if is_store_message(msg['text']):
+            chain, prefix = detect_chain(msg['text'])
+            code, address, city = parse_store_line(msg['text'], chain, prefix)
+            store_entries.append((i, chain, prefix, code, address, city, msg))
+
+    # ── Fase 2: asignar fotos a tiendas ───────────────────────────────────────
+    store_photos = defaultdict(list)   # store_entry_index → [filenames]
+    photo_timestamps: dict = {}        # filename → datetime del mensaje que la contenía
+
+    # Primero: fotos dentro del MISMO mensaje de tienda (enviadas juntas)
+    # Bug histórico: el loop de abajo hace break cuando i >= j, así que
+    # si la foto y la tienda están en el mismo mensaje (i==j) se perdía.
+    store_msg_indices = {i: k for k, (i, *_) in enumerate(store_entries)}
+    for j, msg in enumerate(recent):
+        if msg['photos'] and j in store_msg_indices:
+            for p in msg['photos']:
+                photo_timestamps[p] = msg['dt']
+            store_photos[store_msg_indices[j]].extend(msg['photos'])
+
+    # Luego: fotos enviadas ANTES o DESPUÉS del mensaje de tienda
+    unassigned = 0
+    for j, msg in enumerate(recent):
+        if not msg['photos']:
             continue
-        chain, prefix = detect_chain(msg['text'])
-        code, address, city = parse_store_line(msg['text'], chain, prefix)
-        photos = []
-        for j in range(max(0, i - 20), min(len(recent), i + 10)):
-            other = recent[j]
-            if other['sender'] != msg['sender']:
-                continue
-            diff = (other['dt'] - msg['dt']).total_seconds()
-            if -180 <= diff <= 180 and other['photos']:
-                photos.extend(other['photos'])
+        if j in store_msg_indices:
+            continue   # ya capturadas arriba
+
+        msg_dt = msg['dt']
+        best_same_sender    = None   # foto DESPUÉS del ID, mismo sender  (8h)
+        best_any_sender     = None   # foto DESPUÉS del ID, cualquier sender (1h)
+        best_forward_sender = None   # foto ANTES del ID, mismo sender (5min)
+        # ↑ Cubre el patrón "Romina manda foto y luego escribe el nombre de la tienda"
+
+        for k, (i, chain, prefix, code, address, city, smsg) in enumerate(store_entries):
+            if i < j:
+                # Tienda ANTES de la foto (lógica original)
+                diff = (msg_dt - smsg['dt']).total_seconds()
+                if diff < 0:
+                    continue
+                if smsg['sender'] == msg['sender']:
+                    if diff <= 28800:
+                        if best_same_sender is None or diff < best_same_sender[0]:
+                            best_same_sender = (diff, k)
+                if diff <= 3600:
+                    if best_any_sender is None or diff < best_any_sender[0]:
+                        best_any_sender = (diff, k)
+            else:
+                # Tienda DESPUÉS de la foto (ventana hacia adelante)
+                diff_ahead = (smsg['dt'] - msg_dt).total_seconds()
+                if diff_ahead > 300:   # más de 5 min → cortar búsqueda
+                    break
+                if smsg['sender'] == msg['sender'] and diff_ahead >= 0:
+                    if best_forward_sender is None or diff_ahead < best_forward_sender[0]:
+                        best_forward_sender = (diff_ahead, k)
+
+        # Prioridades: mismo sender (hacia atrás) > mismo sender (hacia adelante) > cualquier sender
+        target = best_same_sender or best_forward_sender or best_any_sender
+        if target:
+            for p in msg['photos']:
+                photo_timestamps[p] = msg['dt']
+            store_photos[target[1]].extend(msg['photos'])
+        else:
+            unassigned += 1
+
+    print(f'[extract] fotos sin tienda asignada: {unassigned}', flush=True)
+
+    # ── Fase 3: construir registros de tienda ─────────────────────────────────
+    raw = []
+    for k, (i, chain, prefix, code, address, city, msg) in enumerate(store_entries):
+        photos = store_photos[k]
         seen = set()
         photos = [p for p in photos if not (p in seen or seen.add(p))]
         pl, bt, notes = parse_status(msg['text'])
         print(f'[extract] tienda={code or address[:30]!r} fotos={len(photos)}', flush=True)
 
-        # Buscar tienda en base de datos formal (filtrando por cadena)
+        # Buscar tienda en base de datos formal (código primero, luego fuzzy por nombre)
         query = f"{chain} {address}" if address else chain
-        db_match = lookup_store(query, chain=chain)
+        db_match = lookup_store(query, chain=chain, code=code)
 
         raw.append({
             'chain': chain, 'code': code, 'address': address, 'city': city,
             'sender': msg['sender'], 'date': msg['dt'].strftime('%d/%m/%Y'),
             'datetime': msg['dt'].isoformat(),
             'photos': photos, 'payloader': pl, 'botaderos': bt, 'notes': notes,
+            # Timestamp por foto: filename → datetime (para mostrar la fecha real en el caption)
+            'photo_timestamps': {p: photo_timestamps[p] for p in photos if p in photo_timestamps},
             # Datos formales desde la planilla (None si no hubo match)
             'db_cadena':      db_match['cadena']      if db_match else None,
             'db_nombre_sala': db_match['nombre_sala']  if db_match else None,
             'db_comuna':      db_match['comuna']       if db_match else None,
             'db_region':      db_match['region']       if db_match else None,
         })
-    # Deduplicate
+    # Deduplicate: misma cadena + mismo nombre (oficial si hay, si no parseado) + misma fecha
     deduped = {}
     for s in raw:
-        key = f"{s['chain']}_{s['code'] or s['address'][:20]}"
+        name_key = s.get('db_nombre_sala') or s['code'] or s['address'][:25]
+        key = f"{s['chain']}_{name_key}_{s['date']}"
         if key in deduped:
             ex = deduped[key]
             merged = ex['photos'] + s['photos']
             seen = set()
             ex['photos'] = [p for p in merged if not (p in seen or seen.add(p))]
+            ex.setdefault('photo_timestamps', {}).update(s.get('photo_timestamps', {}))
             if s['payloader']:
                 ex['payloader'] = s['payloader']
             if s['botaderos']:
@@ -342,6 +505,53 @@ def open_corrected(img_path: str, max_px: int = 1200):
         img = ImageOps.exif_transpose(img)
         if img.mode not in ('RGB', 'L'):
             img = img.convert('RGB')
+        if img.width > max_px or img.height > max_px:
+            img.thumbnail((max_px, max_px), Image.LANCZOS)
+
+        buf = io.BytesIO()
+        img.save(buf, format='JPEG', quality=82)
+        buf.seek(0)
+        return buf
+    except Exception:
+        return None
+
+
+def fit_photo_to_slot(img_path: str, slot_w_emu: int, slot_h_emu: int, max_px: int = 1200) -> io.BytesIO:
+    """
+    Prepara una foto para insertarse en un slot del PPTX:
+    1. Corrige orientación EXIF.
+    2. Center-crop al mismo aspect ratio del slot (evita distorsión).
+    3. Reduce resolución si es necesario.
+    Siempre devuelve un BytesIO listo para usar.
+    """
+    try:
+        img = Image.open(img_path)
+        try:
+            orientation = (img.getexif() or {}).get(274, 1)
+        except Exception:
+            orientation = 1
+        img.load()
+        img = ImageOps.exif_transpose(img)
+        if img.mode not in ('RGB', 'L'):
+            img = img.convert('RGB')
+
+        # Center-crop al ratio del slot
+        target_ratio = slot_w_emu / slot_h_emu if slot_h_emu else 1
+        iw, ih = img.size
+        img_ratio = iw / ih if ih else 1
+
+        if abs(img_ratio - target_ratio) > 0.05:   # diferencia mayor al 5%
+            if img_ratio > target_ratio:
+                # foto más ancha que el slot → recortar lados
+                new_w = int(ih * target_ratio)
+                x0 = (iw - new_w) // 2
+                img = img.crop((x0, 0, x0 + new_w, ih))
+            else:
+                # foto más alta que el slot → recortar arriba/abajo
+                new_h = int(iw / target_ratio)
+                y0 = (ih - new_h) // 2
+                img = img.crop((0, y0, iw, y0 + new_h))
+
         if img.width > max_px or img.height > max_px:
             img.thumbnail((max_px, max_px), Image.LANCZOS)
 
@@ -408,33 +618,46 @@ def set_line(para, idxs, text):
             runs[i].text = ''
 
 
-def update_caption(shape, slot, fecha, pl_status, bt_status):
-    element = 'Payloader Easter' if slot == 0 else 'Botadero Easter'
-    status = pl_status if slot == 0 else bt_status
+def update_caption(shape, photo_date, slot=0, pl_status=None, bt_status=None):
+    """Actualiza el caption de una foto con la fecha real de envío.
+
+    Detecta automáticamente el formato del template:
+    - Simple (1 línea "FECHA: ..."): solo actualiza la fecha → para el nuevo Termplate
+    - Multi-línea (FOTO/FECHA/ELEMENTO/STATUS): rellena todas las líneas → template legado
+    """
     tf = shape.text_frame
     if not tf.paragraphs:
         return
     para = tf.paragraphs[0]
     groups = group_runs_by_br(para)
     n = len(groups)
-    if n >= 1:
-        set_line(para, groups[0], f'FOTO IMPLEMENTACIÓN {slot + 1}')
-    if n >= 2:
-        set_line(para, groups[1], f'FECHA: {fecha}')
-    if n >= 3:
-        g, runs = groups[2], para.runs
-        if len(g) >= 3:
-            runs[g[0]].text = 'ELEMENTO: '
-            runs[g[1]].text = 'Payloader' if slot == 0 else 'Botadero'
-            runs[g[2]].text = ' Easter'
-            for x in g[3:]:
-                runs[x].text = ''
-        elif g:
-            runs[g[0]].text = f'ELEMENTO: {element}'
-            for x in g[1:]:
-                runs[x].text = ''
-    if n >= 4:
-        set_line(para, groups[3], f'STATUS: {status}')
+
+    if n <= 1:
+        # Formato simple: solo hay una línea (ej. "FECHA: 11/03/2026")
+        # Reemplazar con la fecha real de la foto
+        set_line(para, groups[0] if groups else [], f'FECHA: {photo_date}')
+    else:
+        # Formato multi-línea (template legado con FOTO/FECHA/ELEMENTO/STATUS)
+        element = 'Payloader Easter' if slot == 0 else 'Botadero Easter'
+        status = (pl_status if slot == 0 else bt_status) or ''
+        if n >= 1:
+            set_line(para, groups[0], f'FOTO IMPLEMENTACIÓN {slot + 1}')
+        if n >= 2:
+            set_line(para, groups[1], f'FECHA: {photo_date}')
+        if n >= 3:
+            g, runs = groups[2], para.runs
+            if len(g) >= 3:
+                runs[g[0]].text = 'ELEMENTO: '
+                runs[g[1]].text = 'Payloader' if slot == 0 else 'Botadero'
+                runs[g[2]].text = ' Easter'
+                for x in g[3:]:
+                    runs[x].text = ''
+            elif g:
+                runs[g[0]].text = f'ELEMENTO: {element}'
+                for x in g[1:]:
+                    runs[x].text = ''
+        if n >= 4:
+            set_line(para, groups[3], f'STATUS: {status}')
 
 
 def update_store_slide(slide, store, photos_dir, photo_index=None):
@@ -496,8 +719,8 @@ def update_store_slide(slide, store, photos_dir, photo_index=None):
     captions = sorted([s for s in text_shapes
                        if any(k in s.text_frame.text for k in ('FOTO', 'FECHA', 'ELEMENTO'))],
                       key=lambda s: s.left)
-    for slot, cap in enumerate(captions):
-        update_caption(cap, slot, fecha, pl_stat, bt_stat)
+
+    photo_timestamps = store.get('photo_timestamps', {})
 
     sel = select_photos(photos, len(pic_shapes), photos_dir, _photo_index=photo_index)
     sorted_pics = sorted(pic_shapes, key=lambda s: s.left)
@@ -506,12 +729,21 @@ def update_store_slide(slide, store, photos_dir, photo_index=None):
         slide.shapes._spTree.remove(pic_sh._element)
         if i < len(sel):
             img_path = sel[i]  # ya es path completo
+            # Fecha real de la foto (cuando se envió en WhatsApp); fallback a fecha de tienda
+            photo_basename = os.path.basename(img_path)
+            photo_dt = photo_timestamps.get(photo_basename)
+            photo_date = photo_dt.strftime('%d/%m/%Y') if photo_dt else fecha
             try:
-                img_src = open_corrected(img_path) or img_path
+                img_src = fit_photo_to_slot(img_path, w, h) or open_corrected(img_path) or img_path
                 slide.shapes.add_picture(img_src, left, top, w, h)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f'[pptx] ERROR insertando foto {photo_basename}: {e}', flush=True)
+            # Actualizar caption con la fecha real de ESTA foto
+            if i < len(captions):
+                update_caption(captions[i], photo_date, slot=i,
+                               pl_status=pl_stat, bt_status=bt_stat)
         else:
+            # No hay foto para este slot → eliminar caption correspondiente
             if i < len(captions):
                 try:
                     slide.shapes._spTree.remove(captions[i]._element)
@@ -524,8 +756,25 @@ def add_slide_copy(prs, src_idx):
     new = prs.slides.add_slide(src.slide_layout)
     for shape in list(new.shapes):
         new.shapes._spTree.remove(shape._element)
+
+    # Copiar relaciones de imagen del slide origen al nuevo slide.
+    # Sin esto, los r:embed="rIdX" copiados en el XML no tienen contraparte
+    # en el .rels del nuevo slide → las imágenes aparecen rotas en PowerPoint.
+    rId_map = {}
+    for rId, rel in src.part.rels.items():
+        if 'image' in rel.reltype:
+            new_rId = new.part.relate_to(rel.target_part, rel.reltype)
+            rId_map[rId] = new_rId
+
     for shape in src.shapes:
-        new.shapes._spTree.append(copy.deepcopy(shape._element))
+        elem = copy.deepcopy(shape._element)
+        if rId_map:
+            xml_str = etree.tostring(elem, encoding='unicode')
+            for old_rId, new_rId in rId_map.items():
+                xml_str = xml_str.replace(f'r:embed="{old_rId}"', f'r:embed="{new_rId}"')
+                xml_str = xml_str.replace(f'r:link="{old_rId}"', f'r:link="{new_rId}"')
+            elem = etree.fromstring(xml_str)
+        new.shapes._spTree.append(elem)
     return new
 
 
