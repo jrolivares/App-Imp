@@ -139,15 +139,41 @@ HTML = r"""<!DOCTYPE html>
 
   /* Progress */
   #progress-section { display: none; margin-top: 28px; }
+  .prog-header {
+    display: flex; justify-content: space-between; align-items: center; margin-bottom: 9px;
+  }
+  .prog-phase {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 0.72rem; font-weight: 700; letter-spacing: .8px; text-transform: uppercase;
+    color: var(--navy); background: var(--navy-bg); border-radius: 99px; padding: 4px 13px;
+    transition: background .4s, color .4s;
+  }
+  .prog-phase.uploading { background: #E6F7EE; color: #1A7A4A; }
+  .prog-pct {
+    font-size: 1rem; font-weight: 800; color: var(--navy);
+    font-variant-numeric: tabular-nums; min-width: 3.2ch; text-align: right;
+  }
   .progress-bar-wrap {
-    background: #E5E7EB; border-radius: 99px; height: 10px; overflow: hidden; margin-bottom: 10px;
+    background: #E5E7EB; border-radius: 99px; height: 10px; overflow: hidden;
   }
   .progress-bar {
-    height: 100%; border-radius: 99px;
-    background: linear-gradient(90deg, var(--navy-light), var(--navy));
-    transition: width .4s ease;
+    height: 100%; border-radius: 99px; width: 0%;
+    background: linear-gradient(90deg, #34C27A, #1E9E5C);
+    transition: width .35s ease, background .5s ease;
   }
-  .progress-label { font-size: 0.88rem; color: var(--gray); text-align: center; }
+  .progress-bar.processing {
+    background: linear-gradient(90deg, var(--navy-light), var(--navy));
+  }
+  .prog-meta {
+    display: flex; justify-content: space-between; align-items: center; margin-top: 8px;
+  }
+  .prog-detail { font-size: 0.83rem; color: var(--gray); }
+  .prog-speed {
+    font-size: 0.8rem; font-weight: 700; font-variant-numeric: tabular-nums;
+    color: #1A7A4A; background: #E6F7EE; border-radius: 99px;
+    padding: 3px 11px; transition: opacity .3s;
+  }
+  .prog-speed.hidden { opacity: 0; pointer-events: none; }
 
   /* Results */
   #results-section { display: none; margin-top: 28px; }
@@ -275,10 +301,17 @@ HTML = r"""<!DOCTYPE html>
   </form>
 
   <div id="progress-section">
-    <div class="progress-bar-wrap">
-      <div class="progress-bar" id="progress-bar" style="width:0%"></div>
+    <div class="prog-header">
+      <span class="prog-phase uploading" id="prog-phase">📤 Subiendo archivo</span>
+      <span class="prog-pct" id="prog-pct">0%</span>
     </div>
-    <div class="progress-label" id="progress-label">Procesando…</div>
+    <div class="progress-bar-wrap">
+      <div class="progress-bar" id="progress-bar"></div>
+    </div>
+    <div class="prog-meta">
+      <span class="prog-detail" id="prog-detail">Preparando…</span>
+      <span class="prog-speed hidden" id="prog-speed"></span>
+    </div>
   </div>
 
   <div class="error-box" id="error-box"></div>
@@ -363,7 +396,71 @@ dropZone.addEventListener('drop', e => {
   onFileSelected(e.dataTransfer.files[0]);
 });
 
-// Submit
+// ── Helpers de formato ────────────────────────────────────────────────────────
+function fmtBytes(b) {
+  if (b < 1024) return b + ' B';
+  if (b < 1024 * 1024) return (b / 1024).toFixed(0) + ' KB';
+  return (b / 1024 / 1024).toFixed(1) + ' MB';
+}
+function fmtSpeed(bps) {
+  if (bps < 1024) return bps.toFixed(0) + ' B/s';
+  if (bps < 1024 * 1024) return (bps / 1024).toFixed(0) + ' KB/s';
+  return (bps / 1024 / 1024).toFixed(1) + ' MB/s';
+}
+function fmtTime(s) {
+  if (!s || !isFinite(s) || s > 3600) return null;
+  if (s < 60) return Math.round(s) + 's';
+  return Math.floor(s / 60) + 'm ' + Math.round(s % 60) + 's';
+}
+
+// ── Upload con progreso via XHR ───────────────────────────────────────────────
+function uploadXHR(formData) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const t0  = Date.now();
+    let   lastLoaded = 0, lastT = t0, smoothSpeed = 0;
+
+    xhr.upload.addEventListener('progress', e => {
+      if (!e.lengthComputable) return;
+      const now    = Date.now();
+      const dt     = (now - lastT) / 1000;
+      const pct    = Math.round(e.loaded / e.total * 100);
+
+      // Velocidad suavizada (EMA α=0.3)
+      if (dt > 0.15) {
+        const instSpeed = (e.loaded - lastLoaded) / dt;
+        smoothSpeed = smoothSpeed === 0 ? instSpeed : 0.3 * instSpeed + 0.7 * smoothSpeed;
+        lastLoaded = e.loaded; lastT = now;
+      }
+
+      const remaining = smoothSpeed > 0 ? (e.total - e.loaded) / smoothSpeed : null;
+      const eta       = fmtTime(remaining);
+      const detail    = fmtBytes(e.loaded) + ' de ' + fmtBytes(e.total) + (eta ? '  ·  ~' + eta : '');
+
+      document.getElementById('progress-bar').style.width = pct + '%';
+      document.getElementById('prog-pct').textContent     = pct + '%';
+      document.getElementById('prog-detail').textContent  = detail;
+      const sp = document.getElementById('prog-speed');
+      if (smoothSpeed > 0) {
+        sp.textContent = fmtSpeed(smoothSpeed);
+        sp.classList.remove('hidden');
+      }
+    });
+
+    xhr.addEventListener('load', () => {
+      if (xhr.status === 413) return reject(new Error('El archivo ZIP es demasiado grande para el servidor'));
+      if (xhr.status < 200 || xhr.status >= 300) return reject(new Error('Error del servidor (' + xhr.status + ')'));
+      resolve(xhr);
+    });
+    xhr.addEventListener('error', () => reject(new Error('Error de red al subir')));
+    xhr.addEventListener('abort', () => reject(new Error('Subida cancelada')));
+
+    xhr.open('POST', '/upload');
+    xhr.send(formData);
+  });
+}
+
+// ── Submit ────────────────────────────────────────────────────────────────────
 document.getElementById('upload-form').addEventListener('submit', async e => {
   e.preventDefault();
   if (!selectedFile) return;
@@ -371,14 +468,20 @@ document.getElementById('upload-form').addEventListener('submit', async e => {
   const startDate = document.getElementById('start-date').value;
   const endDate   = document.getElementById('end-date').value;
 
-  // Show progress
+  // Mostrar sección de progreso (fase subida)
   document.getElementById('progress-section').style.display = 'block';
-  document.getElementById('results-section').style.display = 'none';
-  document.getElementById('error-box').style.display = 'none';
+  document.getElementById('results-section').style.display  = 'none';
+  document.getElementById('error-box').style.display        = 'none';
   submitBtn.disabled = true;
-  setProgress(5, 'Subiendo archivo…');
 
-  // Upload
+  document.getElementById('prog-phase').className   = 'prog-phase uploading';
+  document.getElementById('prog-phase').textContent = '📤 Subiendo archivo';
+  document.getElementById('prog-pct').textContent   = '0%';
+  document.getElementById('prog-detail').textContent = 'Preparando…';
+  document.getElementById('prog-speed').classList.add('hidden');
+  document.getElementById('progress-bar').style.width = '0%';
+  document.getElementById('progress-bar').classList.remove('processing');
+
   const formData = new FormData();
   formData.append('file', selectedFile);
   formData.append('start_date', startDate);
@@ -387,24 +490,23 @@ document.getElementById('upload-form').addEventListener('submit', async e => {
 
   let jobId;
   try {
-    const res = await fetch('/upload', { method: 'POST', body: formData });
-    let data;
-    const ct = res.headers.get('content-type') || '';
-    if (ct.includes('application/json')) {
-      data = await res.json();
-    } else {
-      const txt = await res.text();
-      if (res.status === 413) throw new Error('El archivo ZIP es demasiado grande para el servidor (máx 500 MB)');
-      throw new Error(`Error del servidor (${res.status}). Revisa que el archivo sea un ZIP válido de WhatsApp.`);
-    }
-    if (!res.ok) throw new Error(data.error || 'Error al subir');
+    const xhr = await uploadXHR(formData);
+    const data = JSON.parse(xhr.responseText);
+    if (data.error) throw new Error(data.error);
     jobId = data.job_id;
   } catch (err) {
     showError(err.message);
     return;
   }
 
-  // Poll status
+  // Transición a fase procesamiento
+  document.getElementById('prog-phase').className   = 'prog-phase';
+  document.getElementById('prog-phase').textContent = '⚙️ Procesando';
+  document.getElementById('prog-speed').classList.add('hidden');
+  document.getElementById('progress-bar').classList.add('processing');
+  document.getElementById('progress-bar').style.width = '5%';
+  document.getElementById('prog-pct').textContent = '5%';
+
   await pollJob(jobId);
 });
 
@@ -444,7 +546,8 @@ async function pollJob(jobId) {
 
 function setProgress(pct, label) {
   document.getElementById('progress-bar').style.width = pct + '%';
-  document.getElementById('progress-label').textContent = label;
+  document.getElementById('prog-pct').textContent     = pct + '%';
+  document.getElementById('prog-detail').textContent  = label;
 }
 
 function showError(msg) {
