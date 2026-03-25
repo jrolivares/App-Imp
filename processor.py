@@ -520,20 +520,42 @@ def fit_photo_to_slot(img_path: str, slot_w_emu: int, slot_h_emu: int, max_px: i
     """
     Prepara una foto para insertarse en un slot del PPTX:
     1. Corrige orientación EXIF.
-    2. Center-crop al mismo aspect ratio del slot (evita distorsión).
-    3. Reduce resolución si es necesario.
+    2. Heurística: si EXIF está completamente ausente Y ratio > 1.55, rota 90° CCW.
+       Cubre fotos portrait guardadas landscape por WhatsApp sin metadata EXIF.
+       (16:9 portrait almacenado = 1.78, 3:2 = 1.5; 4:3 landscape genuino = 1.33 → intacto)
+    3. Center-crop al mismo aspect ratio del slot (evita distorsión).
+    4. Reduce resolución si es necesario.
     Siempre devuelve un BytesIO listo para usar.
     """
     try:
         img = Image.open(img_path)
         try:
-            orientation = (img.getexif() or {}).get(274, 1)
+            exif       = img.getexif() or {}
+            exif_has_data = len(exif) > 0   # True → EXIF present (proper camera/phone)
+            orientation   = exif.get(274, 1)
         except Exception:
-            orientation = 1
+            exif_has_data = False
+            orientation   = 1
         img.load()
         img = ImageOps.exif_transpose(img)
         if img.mode not in ('RGB', 'L'):
             img = img.convert('RGB')
+
+        # ── Heurística portrait-sin-EXIF ─────────────────────────────────────────
+        # Cuando WhatsApp elimina el EXIF sin rotar los píxeles, las fotos portrait
+        # (tomadas con el celular vertical) quedan guardadas landscape.
+        # • 4:3 portrait guardado landscape → ratio 1.33 → IGUAL a un landscape 4:3 genuino
+        #   → no se puede distinguir; se deja sin rotar (falso positivo sería peor).
+        # • 16:9 portrait guardado landscape → ratio 1.78 → claramente por encima de 1.55
+        #   → rotamos 90° CCW para devolver el contenido a portrait antes del center-crop.
+        # • Fotos con EXIF (iPhones, cámaras) → exif_has_data=True → heurística inactiva.
+        if not exif_has_data:
+            w0, h0 = img.size
+            ratio0 = w0 / h0 if h0 else 1
+            if ratio0 > 1.55:
+                img = img.rotate(90, expand=True)   # CCW → portrait content upright
+                print(f'[img] portrait-heuristic applied: {os.path.basename(img_path)}'
+                      f' ({w0}x{h0} → {img.size[0]}x{img.size[1]})', flush=True)
 
         # Center-crop al ratio del slot
         target_ratio = slot_w_emu / slot_h_emu if slot_h_emu else 1
