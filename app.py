@@ -24,7 +24,7 @@ app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2 GB
 
 BASE_DIR      = Path(__file__).parent
 UPLOAD_DIR    = Path(os.environ.get('UPLOAD_DIR', '/tmp/milka_uploads'))
-TEMPLATE_PPTX = BASE_DIR / 'Termplate.pptx'
+TEMPLATE_PPTX = BASE_DIR / 'Template Sell-Out.pptx'
 
 try:
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -705,21 +705,26 @@ def upload():
     job_dir = UPLOAD_DIR / job_id
     job_dir.mkdir(parents=True)
 
-    zip_path    = job_dir / 'chat.zip'
-    photos_dir  = str(job_dir / 'media')
-    output_path = str(job_dir / 'Implementacion_Milka_Easter.pptx')
+    zip_path   = job_dir / 'chat.zip'
+    photos_dir = str(job_dir / 'media')
 
     f.save(str(zip_path))
 
-    # Template: usa el personalizado si se subió, si no el default
+    # Template: usa el personalizado si se subió, si no el default.
+    # El nombre del archivo output hereda el nombre del template usado.
     template_file = request.files.get('template')
     if template_file and template_file.filename.endswith('.pptx'):
+        output_name   = Path(template_file.filename).name
         template_path = str(job_dir / 'template.pptx')
         template_file.save(template_path)
     else:
+        output_name   = TEMPLATE_PPTX.name        # e.g. "Template Sell-Out.pptx"
         template_path = str(TEMPLATE_PPTX)
 
-    jobs[job_id] = {'status': 'processing', 'result': None, 'error': None}
+    output_path = str(job_dir / output_name)
+
+    jobs[job_id] = {'status': 'processing', 'result': None, 'error': None,
+                    'output_name': output_name}
 
     def worker():
         try:
@@ -769,13 +774,15 @@ def status(job_id):
 
 @app.route('/download/<job_id>')
 def download(job_id):
-    output = UPLOAD_DIR / job_id / 'Implementacion_Milka_Easter.pptx'
+    job = jobs.get(job_id)
+    output_name = (job or {}).get('output_name', TEMPLATE_PPTX.name)
+    output = UPLOAD_DIR / job_id / output_name
     if not output.exists():
         return 'Archivo no encontrado', 404
     return send_file(
         str(output),
         as_attachment=True,
-        download_name='Implementacion_Milka_Easter.pptx',
+        download_name=output_name,
         mimetype='application/vnd.openxmlformats-officedocument.presentationml.presentation'
     )
 

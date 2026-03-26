@@ -910,26 +910,35 @@ def make_chain_divider(prs, chain_name, chain_intro_idx=1):
     return new
 
 
+def _detect_template_layout(prs):
+    """Auto-detect template structure from slide count.
+
+    Returns (tmpl_count, photo_to_idx, has_closing_slide).
+
+    9-slide template (Template Sell-Out.pptx):
+      0=title  1=chain  2=1p  3=2p  4=3p  5=5p  6=4p  7=6p  8=closing
+
+    8-slide template (Termplate Sell-Out REV.pptx):
+      0=title  1=chain  2=1p  3=2p  4=3p  5=4p  6=5p  7=6p
+    """
+    n = len(prs.slides)
+    if n >= 9:
+        return 9, {1: 2, 2: 3, 3: 4, 4: 6, 5: 5, 6: 7}, True
+    return 8, {1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 7}, False
+
+
 def generate_pptx(stores: list, photos_dir: str, template_path: str, output_path: str) -> dict:
     """Generate the combined PPTX. Returns summary dict.
 
-    Template structure (0-indexed):
-      0 – title slide
-      1 – chain-intro slide  (NOMBRE CADENA)
-      2 – 1-photo store slide
-      3 – 2-photo store slide
-      4 – 3-photo store slide
-      5 – 4-photo store slide
-      6 – 5-photo store slide
-      7 – 6-photo store slide
+    Supports both 8-slide and 9-slide templates (auto-detected).
     """
     prs = Presentation(template_path)
 
-    TMPL_COUNT   = 8                               # template slides to remove at the end
-    PHOTO_TO_IDX = {1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 7}
+    tmpl_count, photo_to_idx, has_closing = _detect_template_layout(prs)
 
     photo_index = build_photo_index(photos_dir)
     print(f'[pptx] {len(photo_index)} fotos indexadas en {photos_dir}', flush=True)
+    print(f'[pptx] template slides={len(prs.slides)} closing={has_closing}', flush=True)
 
     by_chain = defaultdict(list)
     for s in stores:
@@ -948,13 +957,17 @@ def generate_pptx(stores: list, photos_dir: str, template_path: str, output_path
             # Choose template slide by available photo count (1–6)
             avail_count = sum(1 for p in store.get('photos', []) if p in photo_index)
             n = max(1, min(avail_count, 6))
-            tmpl_idx = PHOTO_TO_IDX[n]
+            tmpl_idx = photo_to_idx[n]
             new_slide = add_slide_copy(prs, tmpl_idx)
             update_store_slide(new_slide, store, photos_dir, photo_index=photo_index)
         summary[chain] = len(chain_stores)
 
-    # Remove the 8 original template slides (reverse order to keep indices valid)
-    for idx in range(TMPL_COUNT - 1, -1, -1):
+    # Closing slide (copy of last template slide, if present)
+    if has_closing:
+        add_slide_copy(prs, tmpl_count - 1)
+
+    # Remove all original template slides (reverse order to keep indices valid)
+    for idx in range(tmpl_count - 1, -1, -1):
         rId = prs.slides._sldIdLst[idx].get(
             '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id')
         prs.part.drop_rel(rId)
