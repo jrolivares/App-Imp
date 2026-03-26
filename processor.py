@@ -734,95 +734,139 @@ def update_caption(shape, photo_date, slot=0, pl_status=None, bt_status=None):
             set_line(para, groups[3], f'STATUS: {status}')
 
 
+_NS_A = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+_NS_P = 'http://schemas.openxmlformats.org/presentationml/2006/main'
+
+
+def _collect_pic_slots(slide):
+    """Return absolute (left, top, w, h) for every picture in the slide,
+    including pictures inside group shapes.  Sorted reading-order (top→bottom,
+    left→right).
+    """
+    slots = []
+    for shape in slide.shapes:
+        if shape.shape_type == 13:                          # direct PICTURE
+            slots.append((shape.left, shape.top, shape.width, shape.height))
+        elif shape.shape_type == 6:                         # GROUP
+            grp = shape._element
+            xfrm = grp.find(f'.//{{{_NS_A}}}xfrm')
+            if xfrm is None:
+                continue
+            off   = xfrm.find(f'{{{_NS_A}}}off')
+            ext   = xfrm.find(f'{{{_NS_A}}}ext')
+            chOff = xfrm.find(f'{{{_NS_A}}}chOff')
+            chExt = xfrm.find(f'{{{_NS_A}}}chExt')
+            if any(e is None for e in [off, ext, chOff, chExt]):
+                continue
+            gx  = int(off.get('x', 0));  gy  = int(off.get('y', 0))
+            gcx = int(ext.get('cx', 1)); gcy = int(ext.get('cy', 1))
+            cx0 = int(chOff.get('x', 0)); cy0 = int(chOff.get('y', 0))
+            ccx = int(chExt.get('cx', 1)); ccy = int(chExt.get('cy', 1))
+            sx = gcx / ccx; sy = gcy / ccy
+            for pic in grp.findall(f'{{{_NS_P}}}pic'):
+                cxfrm = pic.find(f'.//{{{_NS_A}}}xfrm')
+                if cxfrm is None:
+                    continue
+                co = cxfrm.find(f'{{{_NS_A}}}off')
+                ce = cxfrm.find(f'{{{_NS_A}}}ext')
+                if co is None or ce is None:
+                    continue
+                slots.append((
+                    int(gx + (int(co.get('x', 0)) - cx0) * sx),
+                    int(gy + (int(co.get('y', 0)) - cy0) * sy),
+                    int(int(ce.get('cx', 0)) * sx),
+                    int(int(ce.get('cy', 0)) * sy),
+                ))
+    slots.sort(key=lambda s: (round(s[1] / 500000), s[0]))
+    return slots
+
+
+def _remove_all_pics(slide):
+    """Remove all PICTURE (13) and GROUP (6) shapes from the slide spTree."""
+    spTree = slide.shapes._spTree
+    for shape in list(slide.shapes):
+        if shape.shape_type in (13, 6):
+            spTree.remove(shape._element)
+
+
 def update_store_slide(slide, store, photos_dir, photo_index=None):
-    code = store.get('code', '')
+    """Fill a store slide using the new Termplate Sell-Out REV layout."""
+    # ── collect slot positions BEFORE removing anything ───────────────────
+    pic_slots = _collect_pic_slots(slide)
+
+    code    = store.get('code', '')
     address = store.get('address', '')
-    city = store.get('city', '')
-    chain = store.get('chain', '')
-    fecha = store.get('date', '--/--/----')
-    photos = store.get('photos', [])
-    pl_stat = store.get('payloader') or 'Implementado'
-    bt_stat = 'Implementado'
+    city    = store.get('city', '')
+    chain   = store.get('chain', '')
+    fecha   = store.get('date', '--/--/----')
+    photos  = store.get('photos', [])
 
-    chain_label = chain if chain else 'SISA'
-
-    # Usar datos formales de la planilla si están disponibles
     db_nombre = store.get('db_nombre_sala')
     db_comuna = store.get('db_comuna')
     db_region = store.get('db_region')
-    db_cadena = store.get('db_cadena')
 
     if db_nombre:
-        # Formato: NOMBRE SALA — Comuna, Región
-        partes = [db_nombre]
+        header_text = db_nombre
         if db_comuna:
-            partes.append(db_comuna)
-        if db_region:
-            partes.append(db_region)
-        header_text = ' — '.join(partes[:1]) + (f' — {db_comuna}' if db_comuna else '')
+            header_text += f' — {db_comuna}'
         if db_region and db_region != db_comuna:
             header_text += f', {db_region}'
     else:
-        # Fallback: datos parseados desde WhatsApp
-        header_text = (f'{code} {chain_label} - {address}' if code else f'{chain_label} - {address}')
+        chain_label = chain or 'SISA'
+        header_text = (f'{code} {chain_label} - {address}' if code
+                       else f'{chain_label} - {address}')
         if city:
             header_text += f', {city}'
 
     text_shapes = [s for s in slide.shapes if s.has_text_frame]
 
-    # Image containers: PICTURE (13) or image PLACEHOLDER (14 without text)
-    pic_shapes = sorted(
-        [s for s in slide.shapes if s.shape_type == 13 or
-         (s.shape_type == 14 and not s.has_text_frame)],
-        key=lambda s: s.left
-    )
-
-    # Header: widest text shape NOT containing caption keywords
-    CAPTION_KEYS = ('FOTO', 'FECHA', 'ELEMENTO', 'STATUS')
+    # ── store-name box: contains 'NOMBRE TIENDA' or is widest non-FECHA box ─
     for sh in sorted(text_shapes, key=lambda s: -s.width):
         t = sh.text_frame.text
-        if not any(k in t for k in CAPTION_KEYS):
-            for para in sh.text_frame.paragraphs:
-                if para.runs:
-                    para.runs[0].text = header_text
-                    for r in para.runs[1:]:
-                        r.text = ''
-                    break
+        if 'NOMBRE TIENDA' in t or 'FECHA' not in t:
+            if sh.text_frame.paragraphs and sh.text_frame.paragraphs[0].runs:
+                sh.text_frame.paragraphs[0].runs[0].text = header_text
+                for r in sh.text_frame.paragraphs[0].runs[1:]:
+                    r.text = ''
             break
 
-    captions = sorted([s for s in text_shapes
-                       if any(k in s.text_frame.text for k in ('FOTO', 'FECHA', 'ELEMENTO'))],
-                      key=lambda s: s.left)
+    # ── FECHA boxes: one per photo slot, sorted reading-order ────────────────
+    fecha_boxes = sorted(
+        [s for s in text_shapes if 'FECHA' in s.text_frame.text],
+        key=lambda s: (round(s.top / 500000), s.left),
+    )
 
     photo_timestamps = store.get('photo_timestamps', {})
+    sel = select_photos(photos, len(pic_slots), photos_dir, _photo_index=photo_index)
 
-    sel = select_photos(photos, len(pic_shapes), photos_dir, _photo_index=photo_index)
-    sorted_pics = sorted(pic_shapes, key=lambda s: s.left)
-    for i, pic_sh in enumerate(sorted_pics):
-        left, top, w, h = pic_sh.left, pic_sh.top, pic_sh.width, pic_sh.height
-        slide.shapes._spTree.remove(pic_sh._element)
-        if i < len(sel):
-            img_path = sel[i]  # ya es path completo
-            # Fecha real de la foto (cuando se envió en WhatsApp); fallback a fecha de tienda
-            photo_basename = os.path.basename(img_path)
-            photo_dt = photo_timestamps.get(photo_basename)
-            photo_date = photo_dt.strftime('%d/%m/%Y') if photo_dt else fecha
+    photo_dates = []
+    for img_path in sel:
+        bn = os.path.basename(img_path)
+        dt = photo_timestamps.get(bn)
+        photo_dates.append(dt.strftime('%d/%m/%Y') if dt else fecha)
+
+    for i, fbox in enumerate(fecha_boxes):
+        if i < len(photo_dates):
+            tf = fbox.text_frame
+            if tf.paragraphs and tf.paragraphs[0].runs:
+                tf.paragraphs[0].runs[0].text = f'FECHA: {photo_dates[i]}'
+                for r in tf.paragraphs[0].runs[1:]:
+                    r.text = ''
+        else:
             try:
-                img_src = fit_photo_to_slot(img_path, w, h) or open_corrected(img_path) or img_path
+                slide.shapes._spTree.remove(fbox._element)
+            except Exception:
+                pass
+
+    # ── replace picture shapes with real photos ───────────────────────────────
+    _remove_all_pics(slide)
+    for i, (left, top, w, h) in enumerate(pic_slots):
+        if i < len(sel):
+            try:
+                img_src = fit_photo_to_slot(sel[i], w, h) or open_corrected(sel[i]) or sel[i]
                 slide.shapes.add_picture(img_src, left, top, w, h)
             except Exception as e:
-                print(f'[pptx] ERROR insertando foto {photo_basename}: {e}', flush=True)
-            # Actualizar caption con la fecha real de ESTA foto
-            if i < len(captions):
-                update_caption(captions[i], photo_date, slot=i,
-                               pl_status=pl_stat, bt_status=bt_stat)
-        else:
-            # No hay foto para este slot → eliminar caption correspondiente
-            if i < len(captions):
-                try:
-                    slide.shapes._spTree.remove(captions[i]._element)
-                except Exception:
-                    pass
+                print(f'[pptx] ERROR foto {os.path.basename(sel[i])}: {e}', flush=True)
 
 
 def add_slide_copy(prs, src_idx):
@@ -852,38 +896,38 @@ def add_slide_copy(prs, src_idx):
     return new
 
 
-def make_chain_divider(prs, chain_name, title_slide_idx=0):
-    new = add_slide_copy(prs, title_slide_idx)
+def make_chain_divider(prs, chain_name, chain_intro_idx=1):
+    """Copy the chain-intro template slide (index 1) and fill in the chain name."""
+    new = add_slide_copy(prs, chain_intro_idx)
     for sh in new.shapes:
-        if sh.has_text_frame:
-            t = sh.text_frame.text
-            if 'IMPLEMENTACIÓN' in t or 'MILKA' in t:
-                paras = sh.text_frame.paragraphs
-                if paras[0].runs:
-                    paras[0].runs[0].text = chain_name
-                    for r in paras[0].runs[1:]:
-                        r.text = ''
-                for para in paras[1:]:
-                    for r in para.runs:
-                        r.text = ''
-                break
+        if sh.has_text_frame and 'NOMBRE CADENA' in sh.text_frame.text:
+            tf = sh.text_frame
+            if tf.paragraphs and tf.paragraphs[0].runs:
+                tf.paragraphs[0].runs[0].text = chain_name
+                for r in tf.paragraphs[0].runs[1:]:
+                    r.text = ''
+            break
     return new
 
 
 def generate_pptx(stores: list, photos_dir: str, template_path: str, output_path: str) -> dict:
-    """Generate the combined PPTX. Returns summary dict."""
+    """Generate the combined PPTX. Returns summary dict.
+
+    Template structure (0-indexed):
+      0 – title slide
+      1 – chain-intro slide  (NOMBRE CADENA)
+      2 – 1-photo store slide
+      3 – 2-photo store slide
+      4 – 3-photo store slide
+      5 – 4-photo store slide
+      6 – 5-photo store slide
+      7 – 6-photo store slide
+    """
     prs = Presentation(template_path)
 
-    # Keep only title (0) and one store slide as template (1)
-    keep = [0, 1]
-    remove = sorted(set(range(len(prs.slides))) - set(keep), reverse=True)
-    for idx in remove:
-        rId = prs.slides._sldIdLst[idx].get(
-            '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id')
-        prs.part.drop_rel(rId)
-        del prs.slides._sldIdLst[idx]
+    TMPL_COUNT   = 8                               # template slides to remove at the end
+    PHOTO_TO_IDX = {1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 7}
 
-    # Construir índice de fotos una sola vez (búsqueda recursiva en subdirectorios)
     photo_index = build_photo_index(photos_dir)
     print(f'[pptx] {len(photo_index)} fotos indexadas en {photos_dir}', flush=True)
 
@@ -891,22 +935,30 @@ def generate_pptx(stores: list, photos_dir: str, template_path: str, output_path
     for s in stores:
         by_chain[s['chain']].append(s)
 
+    # Copy title slide first (template index 0)
+    add_slide_copy(prs, 0)
+
     summary = {}
     for chain in CHAIN_ORDER:
         chain_stores = by_chain.get(chain, [])
         if not chain_stores:
             continue
-        make_chain_divider(prs, chain, title_slide_idx=0)
+        make_chain_divider(prs, chain, chain_intro_idx=1)
         for store in chain_stores:
-            new_slide = add_slide_copy(prs, 1)
+            # Choose template slide by available photo count (1–6)
+            avail_count = sum(1 for p in store.get('photos', []) if p in photo_index)
+            n = max(1, min(avail_count, 6))
+            tmpl_idx = PHOTO_TO_IDX[n]
+            new_slide = add_slide_copy(prs, tmpl_idx)
             update_store_slide(new_slide, store, photos_dir, photo_index=photo_index)
         summary[chain] = len(chain_stores)
 
-    # Remove the store template slide
-    rId = prs.slides._sldIdLst[1].get(
-        '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id')
-    prs.part.drop_rel(rId)
-    del prs.slides._sldIdLst[1]
+    # Remove the 8 original template slides (reverse order to keep indices valid)
+    for idx in range(TMPL_COUNT - 1, -1, -1):
+        rId = prs.slides._sldIdLst[idx].get(
+            '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id')
+        prs.part.drop_rel(rId)
+        del prs.slides._sldIdLst[idx]
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     prs.save(output_path)
