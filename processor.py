@@ -601,9 +601,9 @@ def fit_photo_to_slot(img_path: str, slot_w_emu: int, slot_h_emu: int, max_px: i
                           f' ({w0}x{h0}→{img.size[0]}x{img.size[1]})'
                           f' col/row={ratio_vc:.2f}', flush=True)
                 elif h0 > w0 and ratio_vc < 1.0:
-                    # Caso B: landscape content stored portrait → rotate CW
-                    img = img.rotate(-90, expand=True)
-                    print(f'[img] rotated CW (case B): {fname}'
+                    # Caso B: landscape content stored portrait → rotate CCW
+                    img = img.rotate(90, expand=True)
+                    print(f'[img] rotated CCW (case B): {fname}'
                           f' ({w0}x{h0}→{img.size[0]}x{img.size[1]})'
                           f' col/row={ratio_vc:.2f}', flush=True)
             except Exception:
