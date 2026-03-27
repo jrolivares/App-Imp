@@ -2,6 +2,7 @@
 WhatsApp chat parser + PPTX generator for Mondelez Milka implementations.
 """
 import re, json, os, copy, zipfile, csv, difflib, unicodedata, urllib.request, io
+import concurrent.futures
 from datetime import datetime
 from pathlib import Path
 from collections import defaultdict
@@ -637,6 +638,26 @@ def fit_photo_to_slot(img_path: str, slot_w_emu: int, slot_h_emu: int, max_px: i
         return None
 
 
+def _fit_photo_safe(img_path: str, w: int, h: int, timeout: int = 45) -> io.BytesIO:
+    """Call fit_photo_to_slot in a thread with a hard timeout.
+
+    Prevents PIL from blocking forever on a corrupt/truncated image file.
+    Falls back to open_corrected (EXIF-only fix) or the raw path on timeout.
+    """
+    fname = os.path.basename(img_path)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        fut = ex.submit(fit_photo_to_slot, img_path, w, h)
+        try:
+            result = fut.result(timeout=timeout)
+            return result  # may be None → caller will fall back
+        except concurrent.futures.TimeoutError:
+            print(f'[pptx] TIMEOUT ({timeout}s) processing {fname} — skipping fit', flush=True)
+            return None
+        except Exception as e:
+            print(f'[pptx] ERROR in fit_photo_to_slot for {fname}: {e}', flush=True)
+            return None
+
+
 def build_photo_index(photos_dir: str) -> dict:
     """
     Construye un índice {nombre_archivo → path_completo} buscando recursivamente
@@ -862,11 +883,13 @@ def update_store_slide(slide, store, photos_dir, photo_index=None):
     _remove_all_pics(slide)
     for i, (left, top, w, h) in enumerate(pic_slots):
         if i < len(sel):
+            fname = os.path.basename(sel[i])
             try:
-                img_src = fit_photo_to_slot(sel[i], w, h) or open_corrected(sel[i]) or sel[i]
+                print(f'[pptx] inserting photo {i+1}/{len(pic_slots)}: {fname}', flush=True)
+                img_src = _fit_photo_safe(sel[i], w, h) or open_corrected(sel[i]) or sel[i]
                 slide.shapes.add_picture(img_src, left, top, w, h)
             except Exception as e:
-                print(f'[pptx] ERROR foto {os.path.basename(sel[i])}: {e}', flush=True)
+                print(f'[pptx] ERROR adding picture {fname}: {e}', flush=True)
 
 
 def add_slide_copy(prs, src_idx):
@@ -888,9 +911,20 @@ def add_slide_copy(prs, src_idx):
         elem = copy.deepcopy(shape._element)
         if rId_map:
             xml_str = etree.tostring(elem, encoding='unicode')
+            # Two-pass replacement to avoid conflicts when old/new rId pairs
+            # are the inverse of each other (e.g. rId2↔rId3).
+            # Pass 1: replace all old rIds with unique sentinel tokens.
+            for old_rId in rId_map:
+                xml_str = xml_str.replace(f'r:embed="{old_rId}"',
+                                          f'r:embed="__REMAP_{old_rId}__"')
+                xml_str = xml_str.replace(f'r:link="{old_rId}"',
+                                          f'r:link="__REMAP_{old_rId}__"')
+            # Pass 2: replace sentinels with the correct new rIds.
             for old_rId, new_rId in rId_map.items():
-                xml_str = xml_str.replace(f'r:embed="{old_rId}"', f'r:embed="{new_rId}"')
-                xml_str = xml_str.replace(f'r:link="{old_rId}"', f'r:link="{new_rId}"')
+                xml_str = xml_str.replace(f'r:embed="__REMAP_{old_rId}__"',
+                                          f'r:embed="{new_rId}"')
+                xml_str = xml_str.replace(f'r:link="__REMAP_{old_rId}__"',
+                                          f'r:link="{new_rId}"')
             elem = etree.fromstring(xml_str)
         new.shapes._spTree.append(elem)
     return new
@@ -947,17 +981,23 @@ def generate_pptx(stores: list, photos_dir: str, template_path: str, output_path
     # Copy title slide first (template index 0)
     add_slide_copy(prs, 0)
 
+    total_stores = sum(len(by_chain.get(c, [])) for c in CHAIN_ORDER)
+    processed = 0
     summary = {}
     for chain in CHAIN_ORDER:
         chain_stores = by_chain.get(chain, [])
         if not chain_stores:
             continue
+        print(f'[pptx] cadena {chain}: {len(chain_stores)} tiendas', flush=True)
         make_chain_divider(prs, chain, chain_intro_idx=1)
         for store in chain_stores:
             # Choose template slide by available photo count (1–6)
             avail_count = sum(1 for p in store.get('photos', []) if p in photo_index)
             n = max(1, min(avail_count, 6))
             tmpl_idx = photo_to_idx[n]
+            store_label = (store.get('db_nombre_sala') or store.get('address', store.get('code', '?')))[:40]
+            processed += 1
+            print(f'[pptx] [{processed}/{total_stores}] {chain} — {store_label} ({n} fotos)', flush=True)
             new_slide = add_slide_copy(prs, tmpl_idx)
             update_store_slide(new_slide, store, photos_dir, photo_index=photo_index)
         summary[chain] = len(chain_stores)
@@ -967,14 +1007,17 @@ def generate_pptx(stores: list, photos_dir: str, template_path: str, output_path
         add_slide_copy(prs, tmpl_count - 1)
 
     # Remove all original template slides (reverse order to keep indices valid)
+    print(f'[pptx] removiendo {tmpl_count} slides de template…', flush=True)
     for idx in range(tmpl_count - 1, -1, -1):
         rId = prs.slides._sldIdLst[idx].get(
             '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id')
         prs.part.drop_rel(rId)
         del prs.slides._sldIdLst[idx]
 
+    print(f'[pptx] guardando {output_path}…', flush=True)
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     prs.save(output_path)
+    print(f'[pptx] listo — {len(prs.slides)} slides en total', flush=True)
     return summary
 
 
